@@ -1,0 +1,27 @@
+{
+  "configDone": false,
+  "integration": "",
+  "machineId": "",
+  "db": {
+    "driver": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "",
+    "username": "",
+    "password": ""
+  },
+  "tables": [],
+  "api": {
+    "baseUrl": "https://api.example.com",
+    "token": ""
+  },
+  "sync": {
+    "intervalSeconds": 60,
+    "enabled": true
+  },
+  "paths": {
+    "snapshot": "data/snapshot.json",
+    "queue": "data/offline-queue.jsonl",
+    "log": "data/app.logs.ndjson"
+  }
+}

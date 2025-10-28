@@ -1,0 +1,3 @@
+@echo off
+echo Starting daemon (Ctrl+C to stop)...
+php bin\sync.php daemon
