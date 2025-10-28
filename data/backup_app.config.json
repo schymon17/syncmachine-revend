@@ -1,0 +1,35 @@
+{
+  "configDone": false,
+  "integration": "",
+  "machineId": "",
+  "db": {
+    "driver": "",
+    "host": "",
+    "port": "",
+    "database": "",
+    "username": "",
+    "password": ""
+  },
+  "api": {
+    "baseUrl": "",
+    "token": ""
+  },
+  "sync": {
+    "intervalSecondsTrans": 60,
+    "enabledTrans": true,
+    "intervalSecondsEans": 60,
+    "enabledEans": true,
+    "intervalSecondsStatus": 60,
+    "enabledStatus": true,
+    "intervalSecondsAdverts": 60,
+    "enabledAdverts": true
+  },
+  "address": "",
+  "notification_emails": [],
+  "notification_emails_bcc": [],
+  "paths": {
+    "snapshot": "data/snapshot.json",
+    "queue": "data/offline-queue.json",
+    "log": "data/log.json"
+  }
+}

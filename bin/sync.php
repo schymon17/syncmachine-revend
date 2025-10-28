@@ -9,7 +9,8 @@ require __DIR__ . '/../src/Sync.php';
 require __DIR__ . '/../src/Bootstrap.php';
 
 $ROOT = realpath(__DIR__ . '/..');
-$CFG  = $ROOT . '/data/app.config.json';
+$CFG = $ROOT . '/data/app.config.json';
+$CFGB = $ROOT . '/data/basic.config.json';
 
 function usage() {
     echo "Usage:\n";
@@ -27,25 +28,29 @@ if (!$cmd) usage();
 
 $config = new Config($CFG);
 $cfgArr = $config->load();
+
+$configBasic = new Config($CFGB);
+$cfgArrBasic = $configBasic->load();
+
 $log = new Logger($ROOT . '/' . ($cfgArr['paths']['log'] ?? 'data/app.logs.ndjson'));
 
-function ensure_bootstrap(Config $config, Logger $log) {
+function ensure_bootstrap(Config $config, Config $configBasic, Logger $log) {
     $cfg = $config->load();
     if (!isset($cfg['configDone']) || $cfg['configDone'] !== true) {
         echo "Running first-time bootstrap...\n";
-        $boot = new Bootstrap($config, $log);
+        $boot = new Bootstrap($config, $configBasic, $log);
         $boot->run();
     }
 }
 
 switch ($cmd) {
     case 'bootstrap':
-        $boot = new Bootstrap($config, $log);
+        $boot = new Bootstrap($config, $configBasic, $log);
         $boot->run();
         break;
 
     case 'run-once':
-        ensure_bootstrap($config, $log);
+        ensure_bootstrap($config, $configBasic, $log);
         $cfgArr = $config->load();
         $sync = new Sync($cfgArr, $log);
         $sync->runOnce();
@@ -53,7 +58,7 @@ switch ($cmd) {
         break;
 
     case 'daemon':
-        ensure_bootstrap($config, $log);
+        ensure_bootstrap($config, $configBasic, $log);
         $cfgArr = $config->load();
         $interval = max(10, (int)($cfgArr['sync']['intervalSeconds'] ?? 60));
         $sync = new Sync($cfgArr, $log);
