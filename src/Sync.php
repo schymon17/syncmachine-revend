@@ -4,6 +4,7 @@ class Sync {
     private function queueOffline(string $path, array $payload): void {
         file_put_contents($path, json_encode($payload).PHP_EOL, FILE_APPEND);
     }
+
     private function flushQueue(Http $http, string $path): void {
         if (!file_exists($path)) return;
         $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
@@ -22,55 +23,233 @@ class Sync {
         }
         file_put_contents($path, implode(PHP_EOL, $remain).(count($remain)?PHP_EOL:''));
     }
+
     public function runOnce(): void {
-        if (!($this->cfg['sync']['enabled'] ?? false)) { $this->log->log('INFO','Sync disabled'); return; }
         $machineId = $this->cfg['machineId'] ?? '';
-        if ($machineId==='') { $this->log->log('ERROR','Machine ID empty'); return; }
+        if ($machineId==='') {
+            $this->log->log('ERROR','Machine ID empty'); return;
+        }
+
         $paths = $this->cfg['paths'];
         $snapshotFile = $paths['snapshot']; $queueFile = $paths['queue'];
         if (!is_dir(dirname($snapshotFile))) mkdir(dirname($snapshotFile),0777,true);
         if (!is_dir(dirname($queueFile))) mkdir(dirname($queueFile),0777,true);
 
-        try { $pdo = Db::pdo($this->cfg['db']); }
-        catch (Throwable $e) { $this->log->log('ERROR','DB connect failed',['error'=>$e->getMessage()]); return; }
+        try {
+            $pdo = Db::pdo($this->cfg['db']);
+        } catch (Throwable $e) {
+            $this->log->log('ERROR','DB connect failed',['error'=>$e->getMessage()]);
+            return;
+        }
 
         $snap = file_exists($snapshotFile) ? json_decode(file_get_contents($snapshotFile), true): [];
+
         $http = new Http($this->cfg['api']['baseUrl'] ?? '', $this->cfg['api']['token'] ?? null);
 
-        $newSnap = $snap; $any = false;
-        foreach ($this->cfg['tables'] as $t) {
+        if (!($this->cfg['sync']['enabledTrans'] ?? false)) {
+            $this->log->log('INFO','Sync disabled - Transactions are disabled');
+        } else {
+            $lastSync = (int)($snap['user_transaction_lastSync'] ?? 0);
+
             try {
-                [$diff, $section] = DbDiff::diff($pdo, $t, $snap);
-                $newSnap[$t['name']] = $section;
-                if (count($diff['inserted']) || count($diff['updated']) || count($diff['deleted'])) {
+                $stmt = $pdo->query("SELECT COALESCE(MAX(dateline),0) AS last_update FROM user_transaction");
+                $latestDateline = (int)($stmt?->fetchColumn() ?? 0);
+            } catch (Throwable $e) {
+                $this->log->log('ERROR', 'MAX(dateline) query failed', ['error' => $e->getMessage()]);
+                $latestDateline = $lastSync;
+            }
+
+            $any = false;
+
+            if ($latestDateline > $lastSync) {
+                $limit = (int)($this->cfg['sync']['transBatch'] ?? 5000);
+                $sql = "SELECT * FROM user_transaction WHERE dateline > :lastSync ORDER BY dateline ASC" . ($limit > 0 ? " LIMIT $limit" : "");
+                try {
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute([':lastSync' => $lastSync]);
+                    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+                } catch (Throwable $e) {
+                    $this->log->log('ERROR', 'Fetch transactions failed', ['error' => $e->getMessage()]);
+                    $rows = [];
+                }
+                $midRow = [];
+                try {
+                    $midStmt = $pdo->query("SELECT * FROM mid ORDER BY id DESC LIMIT 1");
+                    $midRow = $midStmt?->fetch(PDO::FETCH_ASSOC) ?: [];
+                } catch (Throwable $e) {
+                    $this->log->log('WARN', 'MID read failed', ['error' => $e->getMessage()]);
+                }
+
+                $data = [];
+                foreach ($rows as $r) {
+                    $transactionId = $r['print_barcode'] ?? null;
+                    if (!$transactionId) continue;
+
+                    $dateline = (int)($r['dateline'] ?? 0);
+                    $formattedTime = $dateline > 0 ? date('Y-m-d H:i:s', $dateline) : null;
+
+                    $r['datetime'] = $formattedTime;
+                    $data[$transactionId]['details'][] = $r;
+
+                    $prev = $data[$transactionId]['last_transaction_time'] ?? null;
+                    if (!$prev || $dateline > strtotime($prev)) {
+                        $data[$transactionId]['last_transaction_time'] = $formattedTime;
+                    }
+                }
+
+                if (!empty($data)) {
                     $any = true;
-                    $payload = ["machineId"=>$machineId, "table"=>$t['name'], "timestamp"=>gmdate('c'), "changes"=>$diff];
+                    $http = new Http($this->cfg['api']['baseUrl'] ?? '', $this->cfg['api']['token'] ?? null);
+                    $payload = [
+                        'machineId' => $machineId,
+                        'timestamp' => gmdate('c'),
+                        'kind' => 'transactions',
+                        'data' => [
+                            'transactions' => $data,
+                            'mid' => $midRow,
+                        ],
+                        'integration' => $this->cfg['integration'],
+                    ];
+
                     try {
-                        $res = $http->postJson('/sync/changes', $payload);
-                        if ($res['status'] >= 200 && $res['status'] < 300) $this->log->log('INFO','Pushed changes',['table'=>$t['name']]);
-                        else throw new RuntimeException('Bad status '.$res['status']);
+                        $res = $http->postJson('/trans', $payload);
+                        if ($res['status'] >= 200 && $res['status'] < 300) {
+                            $snap['user_transaction_lastSync'] = $latestDateline;
+                            @file_put_contents(
+                                $snapshotFile,
+                                json_encode($snap, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+                            );
+                            $this->log->log('INFO', 'Sent transactions', [
+                                'count' => count($data),
+                                'from' => $lastSync,
+                                'to' => $latestDateline
+                            ]);
+                        } else {
+                            throw new RuntimeException('Bad status ' . $res['status']);
+                        }
                     } catch (Throwable $e) {
                         $this->queueOffline($queueFile, $payload);
-                        $this->log->log('WARN','Queued changes (offline)',['table'=>$t['name'],'error'=>$e->getMessage()]);
+                        $this->log->log('WARN', 'Queued transactions (offline)', ['error' => $e->getMessage()]);
                     }
                 } else {
-                    $this->log->log('INFO','No changes',['table'=>$t['name']]);
+                    $this->log->log('INFO', 'No new records to send (post-filter)');
                 }
-            } catch (Throwable $e) {
-                $this->log->log('ERROR','Diff error',['table'=>$t['name'] ?? 'unknown','error'=>$e->getMessage()]);
+            } else {
+                $this->log->log('INFO', 'No new changes detected');
             }
-        }
-        file_put_contents($snapshotFile, json_encode($newSnap, JSON_PRETTY_PRINT));
-        if (!$any) {
-            $payload = ["machineId"=>$machineId, "timestamp"=>gmdate('c'), "kind"=>"heartbeat"];
-            try { $res = $http->postJson('/sync/changes', $payload);
-                  if ($res['status']>=200 && $res['status']<300) $this->log->log('INFO','Heartbeat sent');
-                  else throw new RuntimeException('Bad status '.$res['status']);
-            } catch (Throwable $e) {
-                $this->queueOffline($queueFile, $payload);
-                $this->log->log('WARN','Heartbeat queued',['error'=>$e->getMessage()]);
+
+            if (!$any) {
+                $http = new Http($this->cfg['api']['baseUrl'] ?? '', $this->cfg['api']['token'] ?? null);
+                $payload = [
+                    'machineId' => $machineId,
+                    'timestamp' => gmdate('c'),
+                    'kind' => 'heartbeat',
+                ];
+                try {
+                    $res = $http->postJson('/heartbeat', $payload);
+                    if ($res['status'] >= 200 && $res['status'] < 300) {
+                        $this->log->log('INFO', 'Heartbeat sent');
+                    } else {
+                        throw new RuntimeException('Bad status ' . $res['status']);
+                    }
+                } catch (Throwable $e) {
+                    $this->queueOffline($queueFile, $payload);
+                    $this->log->log('WARN', 'Heartbeat queued', ['error' => $e->getMessage()]);
+                }
             }
+
+            $http = new Http($this->cfg['api']['baseUrl'] ?? '', $this->cfg['api']['token'] ?? null);
+            $this->flushQueue($http, $queueFile);
         }
-        $this->flushQueue($http, $queueFile);
+
+        if (!($this->cfg['sync']['enabledEans'] ?? false)) {
+            $this->log->log('INFO','Sync disabled - Eans are disabled');
+        } else {
+
+        }
+
+        if (!($this->cfg['sync']['enabledStatus'] ?? false)) {
+            $this->log->log('INFO','Sync disabled - Status are disabled');
+        } else {
+            try {
+                $stmt = $pdo->query("SELECT * FROM command ORDER BY id DESC LIMIT 1");
+                $statusRow = $stmt?->fetch(PDO::FETCH_ASSOC) ?: [];
+            } catch (Throwable $e) {
+                $this->log->log('ERROR', 'Status query failed', [ 'error' => $e->getMessage() ]);
+                $statusRow = [];
+            }
+
+            $newHash = hash('sha256', json_encode($statusRow));
+            $oldHash = $snap['status_hash'] ?? null;
+            $hasChange = $newHash !== $oldHash;
+
+            $any = false;
+
+            if ($hasChange) {
+                $any = true;
+                $payload = [
+                    'machineId' => $machineId,
+                    'timestamp' => gmdate('c'),
+                    'kind' => 'status',
+                    'data' => [
+                        'command' => $statusRow,
+                    ],
+                ];
+
+                if (!empty($this->cfg['address'])) {
+                    $payload['address'] = $this->cfg['address'];
+                }
+                if (!empty($this->cfg['notification_emails'])) {
+                    $payload['notification_emails'] = $this->cfg['notification_emails'];
+                }
+                if (!empty($this->cfg['notification_emails_bcc'])) {
+                    $payload['notification_emails_bcc'] = $this->cfg['notification_emails_bcc'];
+                }
+
+                try {
+                    $res = $http->postJson('/status', $payload);
+                    if ($res['status'] >= 200 && $res['status'] < 300) {
+                        $this->log->log('INFO', 'Pushed status');
+                        $snap['status_hash'] = $newHash;
+                    } else {
+                        throw new RuntimeException('Bad status ' . $res['status']);
+                    }
+                } catch (Throwable $e) {
+                    $this->queueOffline($queueFile, $payload);
+                    $this->log->log('WARN', 'Queued status (offline)', ['error' => $e->getMessage()]);
+                }
+            } else {
+                $this->log->log('INFO', 'No status change');
+            }
+
+            @file_put_contents($snapshotFile, json_encode($snap, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+            if (!$any) {
+                $payload = [
+                    'machineId' => $machineId,
+                    'timestamp' => gmdate('c'),
+                    'kind' => 'heartbeat',
+                ];
+                try {
+                    $res = $http->postJson('/heartbeat', $payload);
+                    if ($res['status'] >= 200 && $res['status'] < 300) {
+                        $this->log->log('INFO', 'Heartbeat sent');
+                    } else {
+                        throw new RuntimeException('Bad status ' . $res['status']);
+                    }
+                } catch (Throwable $e) {
+                    $this->queueOffline($queueFile, $payload);
+                    $this->log->log('WARN', 'Heartbeat queued', ['error' => $e->getMessage()]);
+                }
+            }
+
+            $this->flushQueue($http, $queueFile);
+        }
+
+        if (!($this->cfg['sync']['enabledAdverts'] ?? false)) {
+            $this->log->log('INFO','Adverts disabled - Status are disabled');
+        } else {
+
+        }
     }
 }

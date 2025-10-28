@@ -1,2 +1,16 @@
-{"ts":"2025-10-28T08:05:41+00:00","level":"INFO","message":"Config bootstrapped","ctx":{"machineId":"rvm_4000_1486616541"}}
-{"ts":"2025-10-28T08:08:20+00:00","level":"INFO","message":"Config bootstrapped","ctx":{"machineId":"rvm_4000_1486616541"}}
+{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
+{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Pushed status","ctx":[]}
+{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-28T20:17:00+00:00","level":"WARN","message":"MID read failed","ctx":{"error":"SQLSTATE[42S22]: Column not found: 1054 Unknown column 'id' in 'order clause'"}}
+{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Sent transactions","ctx":{"count":288,"from":0,"to":1759315684}}
+{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
+{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"No status change","ctx":[]}
+{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Heartbeat sent","ctx":[]}
+{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-28T20:17:24+00:00","level":"INFO","message":"No new changes detected","ctx":[]}
+{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Heartbeat sent","ctx":[]}
+{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
+{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"No status change","ctx":[]}
+{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Heartbeat sent","ctx":[]}
+{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
