@@ -22,7 +22,9 @@
     "intervalSecondsStatus": 60,
     "enabledStatus": true,
     "intervalSecondsAdverts": 60,
-    "enabledAdverts": true
+    "enabledAdverts": true,
+    "intervalSecondsCoupons": 60,
+    "enabledCoupons": true
   },
   "address": "",
   "notification_emails": [],

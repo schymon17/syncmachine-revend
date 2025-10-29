@@ -165,7 +165,79 @@ class Sync {
         if (!($this->cfg['sync']['enabledEans'] ?? false)) {
             $this->log->log('INFO','Sync disabled - Eans are disabled');
         } else {
+            try {
+                $payload = [
+                    'machineId' => $machineId,
+                ];
+                $res = $http->postJson('/eans', $payload);
+                if (($res['status'] ?? 0) < 200 || ($res['status'] ?? 0) >= 300) {
+                    throw new RuntimeException('Bad status ' . ($res['status'] ?? ''));
+                }
+            } catch (Throwable $e) {
+                $this->log->log('ERROR', 'Fetch EANs failed', ['error' => $e->getMessage()]);
+                return;
+            }
 
+            $response = $res['json'] ?? null;
+            if ($response === null) {
+                $this->log->log('ERROR', 'Fetch EANs: empty body or invalid JSON');
+                return;
+            }
+
+            $items = is_array($response) && array_key_exists('data', $response) ? ($response['data'] ?? []) : $response;
+            if (!is_array($items)) {
+                $this->log->log('ERROR', 'Unexpected EANs format');
+                return;
+            }
+
+            $newHash = hash('sha256', json_encode($items));
+            if (($snap['eans_hash'] ?? null) === $newHash) {
+                $this->log->log('INFO', 'EANs unchanged - nothing to import');
+                return;
+            }
+
+            $inserted = 0;
+            try {
+                $pdo->beginTransaction();
+                $pdo->exec('TRUNCATE TABLE barcode');
+
+                $sql = 'INSERT INTO barcode (barcode, bottleinfo, value, material_type, metal, capacity, weight) VALUES (:barcode, :bottleinfo, :value, :material_type, :metal, :capacity, :weight)';
+                $stmt = $pdo->prepare($sql);
+
+                foreach ($items as $it) {
+                    if (!is_array($it)) continue;
+
+                    $barcode = $it['barcode'] ?? null;
+                    if (!$barcode) continue;
+
+                    $bottleinfo = $it['bottleinfo'] ?? null;
+                    if (is_array($bottleinfo) || is_object($bottleinfo)) {
+                        $bottleinfo = json_encode($bottleinfo, JSON_UNESCAPED_UNICODE);
+                    }
+
+                    $stmt->execute([
+                        ':barcode' => (string)$barcode,
+                        ':bottleinfo' => $bottleinfo,
+                        ':value' => isset($it['value']) ? $it['value'] : null,
+                        ':material_type' => $it['material_type'] ?? null,
+                        ':metal' => isset($it['metal']) ? (int)$it['metal'] : null,
+                        ':capacity' => isset($it['capacity']) ? $it['capacity'] : null,
+                        ':weight' => isset($it['weight']) ? $it['weight'] : null,
+                    ]);
+                    $inserted++;
+                }
+
+                $pdo->commit();
+                $snap['eans_hash'] = $newHash;
+                $snap['eans_count'] = $inserted;
+                @file_put_contents($snapshotFile, json_encode($snap, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+                $this->log->log('INFO', 'EANs imported', ['count' => $inserted]);
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                $this->log->log('ERROR', 'EANs import failed', ['error' => $e->getMessage()]);
+                return;
+            }
         }
 
         if (!($this->cfg['sync']['enabledStatus'] ?? false)) {
