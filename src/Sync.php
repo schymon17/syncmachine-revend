@@ -168,9 +168,12 @@ class Sync {
             try {
                 $payload = [
                     'machineId' => $machineId,
+                    'timestamp' => gmdate('c'),
+                    'integration' => $this->cfg['integration'],
                 ];
                 $res = $http->postJson('/eans', $payload);
                 if (($res['status'] ?? 0) < 200 || ($res['status'] ?? 0) >= 300) {
+
                     throw new RuntimeException('Bad status ' . ($res['status'] ?? ''));
                 }
             } catch (Throwable $e) {
@@ -178,13 +181,15 @@ class Sync {
                 return;
             }
 
-            $response = $res['json'] ?? null;
+            $response = $res['body'] ?? null;
+
             if ($response === null) {
                 $this->log->log('ERROR', 'Fetch EANs: empty body or invalid JSON');
                 return;
             }
 
             $items = is_array($response) && array_key_exists('data', $response) ? ($response['data'] ?? []) : $response;
+
             if (!is_array($items)) {
                 $this->log->log('ERROR', 'Unexpected EANs format');
                 return;
@@ -197,14 +202,18 @@ class Sync {
             }
 
             $inserted = 0;
+
             try {
-                $pdo->beginTransaction();
+                $pdo->exec("ALTER TABLE barcode MODIFY bottleinfo VARCHAR(255)");
+                $pdo->exec("ALTER TABLE barcode MODIFY brand VARCHAR(255)");
                 $pdo->exec('TRUNCATE TABLE barcode');
 
-                $sql = 'INSERT INTO barcode (barcode, bottleinfo, value, material_type, metal, capacity, weight) VALUES (:barcode, :bottleinfo, :value, :material_type, :metal, :capacity, :weight)';
+                $pdo->beginTransaction();
+
+                $sql = 'INSERT INTO barcode (barcode, brand, bottleinfo, value, maxsdiam, minsdiam, maxbdiam, minbdiam, material_type, metal, capacity, weight, version) VALUES (:barcode, :brand, :bottleinfo, :value, :maxsdiam, :minsdiam, :maxbdiam, :minbdiam, :material_type, :metal, :capacity, :weight, :version)';
                 $stmt = $pdo->prepare($sql);
 
-                foreach ($items as $it) {
+                foreach ($items['attributes'] as $it) {
                     if (!is_array($it)) continue;
 
                     $barcode = $it['barcode'] ?? null;
@@ -217,24 +226,38 @@ class Sync {
 
                     $stmt->execute([
                         ':barcode' => (string)$barcode,
+                        ':brand' => $it['brand'] ?? null,
                         ':bottleinfo' => $bottleinfo,
-                        ':value' => isset($it['value']) ? $it['value'] : null,
-                        ':material_type' => $it['material_type'] ?? null,
+                        ':value' => $it['value'] ?? null,
+                        ':maxsdiam' => $it['maxsdiam'] ?? null,
+                        ':minsdiam' => $it['minsdiam'] ?? null,
+                        ':maxbdiam' => $it['maxbdiam'] ?? null,
+                        ':minbdiam' => $it['minbdiam'] ?? null,
+                        ':material_type' => $it['material_type']  ?? null,
                         ':metal' => isset($it['metal']) ? (int)$it['metal'] : null,
-                        ':capacity' => isset($it['capacity']) ? $it['capacity'] : null,
-                        ':weight' => isset($it['weight']) ? $it['weight'] : null,
+                        ':capacity' => $it['capacity'] ?? null,
+                        ':weight' => $it['weight'] ?? null,
+                        ':version' => $it['version'] ?? null,
                     ]);
+
                     $inserted++;
                 }
 
-                $pdo->commit();
-                $snap['eans_hash'] = $newHash;
+                // Commit only if we are still in a transaction (defensive)
+                if ($pdo->inTransaction()) {
+                    $pdo->commit();
+                }
+
+                $snap['eans_hash']  = $newHash;
                 $snap['eans_count'] = $inserted;
                 @file_put_contents($snapshotFile, json_encode($snap, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
                 $this->log->log('INFO', 'EANs imported', ['count' => $inserted]);
+
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
                 $this->log->log('ERROR', 'EANs import failed', ['error' => $e->getMessage()]);
                 return;
             }

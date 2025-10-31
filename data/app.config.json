@@ -1,7 +1,7 @@
 {
     "configDone": true,
-    "integration": "comp",
-    "machineId": "rvm_4000_1486616541",
+    "integration": "kaucja",
+    "machineId": "RVM_4000_1161321896",
     "db": {
         "driver": "mysql",
         "host": "127.0.0.1",
@@ -16,11 +16,11 @@
     },
     "sync": {
         "intervalSecondsTrans": 60,
-        "enabledTrans": true,
+        "enabledTrans": false,
         "intervalSecondsEans": 60,
-        "enabledEans": false,
+        "enabledEans": true,
         "intervalSecondsStatus": 60,
-        "enabledStatus": true,
+        "enabledStatus": false,
         "intervalSecondsAdverts": 60,
         "enabledAdverts": false,
         "intervalSecondsCoupons": 60,

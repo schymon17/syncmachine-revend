@@ -1,0 +1,1 @@
+Zmienic dlugosc kolumny

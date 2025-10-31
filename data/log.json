@@ -1,25 +1,23 @@
-{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
-{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
-{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Pushed status","ctx":[]}
-{"ts":"2025-10-28T19:56:48+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
-{"ts":"2025-10-28T20:17:00+00:00","level":"WARN","message":"MID read failed","ctx":{"error":"SQLSTATE[42S22]: Column not found: 1054 Unknown column 'id' in 'order clause'"}}
-{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Sent transactions","ctx":{"count":288,"from":0,"to":1759315684}}
-{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
-{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"No status change","ctx":[]}
-{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Heartbeat sent","ctx":[]}
-{"ts":"2025-10-28T20:17:00+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
-{"ts":"2025-10-28T20:17:24+00:00","level":"INFO","message":"No new changes detected","ctx":[]}
-{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Heartbeat sent","ctx":[]}
-{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
-{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"No status change","ctx":[]}
-{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Heartbeat sent","ctx":[]}
-{"ts":"2025-10-28T20:17:25+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
-{"ts":"2025-10-29T07:18:14+00:00","level":"INFO","message":"Config bootstrapped","ctx":{"machineId":"rvm_4000_1486616541"}}
-{"ts":"2025-10-29T07:18:30+00:00","level":"ERROR","message":"DB connect failed","ctx":{"error":"SQLSTATE[HY000] [2002] Connection refused"}}
-{"ts":"2025-10-29T07:18:50+00:00","level":"ERROR","message":"DB connect failed","ctx":{"error":"SQLSTATE[HY000] [2002] Connection refused"}}
-{"ts":"2025-10-29T07:19:50+00:00","level":"ERROR","message":"DB connect failed","ctx":{"error":"SQLSTATE[HY000] [1049] Unknown database 'machineql'"}}
-{"ts":"2025-10-29T07:20:02+00:00","level":"WARN","message":"MID read failed","ctx":{"error":"SQLSTATE[42S22]: Column not found: 1054 Unknown column 'id' in 'order clause'"}}
-{"ts":"2025-10-29T07:20:02+00:00","level":"INFO","message":"Sent transactions","ctx":{"count":288,"from":0,"to":1759315684}}
-{"ts":"2025-10-29T07:20:02+00:00","level":"INFO","message":"Sync disabled - Eans are disabled","ctx":[]}
-{"ts":"2025-10-29T07:20:02+00:00","level":"INFO","message":"Pushed status","ctx":[]}
-{"ts":"2025-10-29T07:20:02+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:01:16+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:01:16+00:00","level":"INFO","message":"EANs imported","ctx":{"count":0}}
+{"ts":"2025-10-31T08:01:16+00:00","level":"INFO","message":"Sync disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:01:16+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:02:36+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:04:17+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:04:18+00:00","level":"ERROR","message":"EANs import failed","ctx":{"error":"SQLSTATE[22001]: String data, right truncated: 1406 Data too long for column 'bottleinfo' at row 1"}}
+{"ts":"2025-10-31T08:07:26+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:07:27+00:00","level":"INFO","message":"EANs imported","ctx":{"count":50}}
+{"ts":"2025-10-31T08:07:27+00:00","level":"INFO","message":"Sync disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:07:27+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:09:05+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:09:06+00:00","level":"ERROR","message":"EANs import failed","ctx":{"error":"SQLSTATE[HY093]: Invalid parameter number: number of bound variables does not match number of tokens"}}
+{"ts":"2025-10-31T08:15:28+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:15:29+00:00","level":"INFO","message":"EANs imported","ctx":{"count":50}}
+{"ts":"2025-10-31T08:15:29+00:00","level":"INFO","message":"Sync disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:15:29+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:16:58+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:16:59+00:00","level":"ERROR","message":"EANs import failed","ctx":{"error":"SQLSTATE[22001]: String data, right truncated: 1406 Data too long for column 'brand' at row 1"}}
+{"ts":"2025-10-31T08:17:20+00:00","level":"INFO","message":"Sync disabled - Transactions are disabled","ctx":[]}
+{"ts":"2025-10-31T08:17:21+00:00","level":"INFO","message":"EANs imported","ctx":{"count":50}}
+{"ts":"2025-10-31T08:17:21+00:00","level":"INFO","message":"Sync disabled - Status are disabled","ctx":[]}
+{"ts":"2025-10-31T08:17:21+00:00","level":"INFO","message":"Adverts disabled - Status are disabled","ctx":[]}
