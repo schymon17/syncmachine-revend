@@ -2,16 +2,12 @@
 
 class Sync {
     public function __construct(private array $cfg, private Logger $log) {}
-
-    /* -------------------- Small safe helpers -------------------- */
-
     private function atomicWrite(string $path, string $data): void {
         try {
             $tmp = $path.'.tmp';
             file_put_contents($tmp, $data, LOCK_EX);
             @rename($tmp, $path);
         } catch (Throwable $e) {
-            // as a fallback, try direct write (still non-fatal)
             @file_put_contents($path, $data, LOCK_EX);
         }
     }
@@ -33,7 +29,6 @@ class Sync {
             $line = json_encode($payload, JSON_UNESCAPED_UNICODE).PHP_EOL;
             file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
         } catch (Throwable $e) {
-            // best effort, never block
             $this->log->log('WARN', 'Failed to append queue file', ['error'=>$e->getMessage()]);
         }
     }
@@ -71,7 +66,7 @@ class Sync {
 
     private function safeHeartbeat(Http $http, string $queueFile, string $machineId): void {
         try {
-            $payload = ['machineId'=>$machineId,'timestamp'=>gmdate('c'),'kind'=>'heartbeat'];
+            $payload = ['machineId' => $machineId, 'timestamp' => gmdate('c'), 'kind' => 'heartbeat'];
             $res = $http->postJson('/heartbeat', $payload);
             $status = (int)($res['status'] ?? 0);
             if ($status >= 200 && $status < 300) {
@@ -81,7 +76,7 @@ class Sync {
             }
         } catch (Throwable $e) {
             $this->queueOffline($queueFile, [
-                'machineId'=>$machineId,'timestamp'=>gmdate('c'),'kind'=>'heartbeat'
+                'machineId' => $machineId, 'timestamp' => gmdate('c'), 'kind' => 'heartbeat'
             ]);
             $this->log->log('WARN', 'Heartbeat queued', ['error'=>$e->getMessage()]);
         }
@@ -94,9 +89,6 @@ class Sync {
             $this->log->log('WARN', 'Snapshot write failed (non-fatal)', ['error'=>$e->getMessage()]);
         }
     }
-
-    /* -------------------- Orchestration -------------------- */
-
     public function runOnce(): void {
         $machineId = $this->cfg['machineId'] ?? '';
         if ($machineId === '') {
@@ -147,14 +139,16 @@ class Sync {
             $this->log->log('INFO','Sync disabled - Coupons are disabled or DB not ready');
         }
 
-        if ($this->cfg['sync']['enabledAdverts'] ?? false) {
-            try {
-                // no-op now
-            } catch (Throwable $e) {
-                $this->log->log('WARN','Adverts step failed (non-fatal)', ['error'=>$e->getMessage()]);
-            }
+        if (($this->cfg['sync']['enabledAdverts'] ?? false) && $pdo) {
+            $this->runAdverts($pdo, $http, $snapshotFile, $snap, $machineId);
         } else {
-            $this->log->log('INFO','Sync disabled - Adverts are disabled');
+            $this->log->log('INFO','Sync disabled - Adverts are disabled or DB not ready');
+        }
+
+        try {
+            $this->safeHeartbeat($http, $queueFile, $machineId);
+        } catch (Throwable $e) {
+            $this->log->log('WARN','Heartbeat failed at end (non-fatal)', ['error'=>$e->getMessage()]);
         }
     }
 
@@ -474,6 +468,156 @@ class Sync {
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) { try { $pdo->rollBack(); } catch (Throwable) {} }
             $this->log->log('ERROR', 'Coupons queue update failed (non-fatal)', ['error' => $e->getMessage()]);
+        }
+    }
+
+    private function runAdverts(PDO $pdo, Http $http, string $snapshotFile, array &$snap, string $machineId): void
+    {
+        try {
+            $res = $http->postJson('/adverts', [
+                'machineId'   => $machineId,
+                'timestamp'   => gmdate('c'),
+                'integration' => $this->cfg['integration'] ?? null,
+            ]);
+
+            $status = (int)($res['status'] ?? 0);
+            if ($status < 200 || $status >= 300) {
+                throw new RuntimeException('Bad status '.$status);
+            }
+
+            $body = $res['body'] ?? null;
+            if ($body === null) {
+                throw new RuntimeException('Empty adverts body');
+            }
+
+            if (isset($body['adverts'])) {
+                $adverts = $body['adverts'];
+            } elseif (isset($body['data']['adverts'])) {
+                $adverts = $body['data']['adverts'];
+            } else {
+                $this->log->log('INFO', 'No adverts section in API response');
+                return;
+            }
+
+            if (!is_array($adverts) || !$adverts) {
+                $this->log->log('INFO', 'Adverts list is empty');
+                return;
+            }
+
+            $newHash = hash('sha256', json_encode($adverts));
+            $oldHash = $snap['adverts_hash'] ?? null;
+
+            if ($newHash === $oldHash) {
+                $this->log->log('INFO', 'Adverts unchanged - skipping download and DB update');
+                return;
+            }
+
+            $baseDir = 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic';
+            if (!is_dir($baseDir)) {
+                @mkdir($baseDir, 0777, true);
+            }
+
+            $savedPaths = [
+                'p1' => null,
+                'p2' => null,
+                'p3' => null,
+                'p4' => null,
+                'p5' => null,
+            ];
+
+            foreach ($adverts as $slotKey => $ad) {
+                if (!is_array($ad)) {
+                    continue;
+                }
+
+                $slot = $ad['slot'] ?? $slotKey;
+
+                if (!in_array($slot, ['p1', 'p2', 'p3', 'p4', 'p5'], true)) {
+                    continue;
+                }
+
+                if (!empty($ad['placeholder'])) {
+                    $this->log->log('INFO', sprintf('Advert %s is placeholder, skipping download', $slot));
+                    $savedPaths[$slot] = null;
+                    continue;
+                }
+
+                $url = $ad['url'] ?? null;
+                if (!$url) {
+                    $this->log->log('WARN', sprintf('Advert %s has no URL, skipping', $slot));
+                    continue;
+                }
+
+                $nameFromApi = $ad['name'] ?? null;
+                if ($nameFromApi) {
+                    $fileName = $slot . '_' . $nameFromApi;
+                } else {
+                    $basename = basename(parse_url($url, PHP_URL_PATH) ?: '');
+                    if ($basename === '' || $basename === '/') {
+                        $basename = $slot . '.bin';
+                    }
+                    $fileName = $slot . '_' . $basename;
+                }
+
+                $targetPath = rtrim($baseDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
+
+                try {
+                    $data = @file_get_contents($url);
+                    if ($data === false) {
+                        throw new RuntimeException('file_get_contents failed');
+                    }
+
+                    $this->atomicWrite($targetPath, $data);
+                    $this->log->log('INFO', sprintf('Downloaded advert %s to %s', $slot, $targetPath));
+
+                    $savedPaths[$slot] = $targetPath;
+                } catch (Throwable $e) {
+                    $this->log->log('WARN', sprintf('Failed to download advert %s', $slot), [
+                        'error' => $e->getMessage(),
+                        'url' => $url,
+                    ]);
+                    continue;
+                }
+            }
+
+            $pDown0 = $savedPaths['p1'] ?? null;
+            $pDown1 = $savedPaths['p2'] ?? null;
+            $pDown2 = $savedPaths['p3'] ?? null;
+            $pDown3 = $savedPaths['p4'] ?? null;
+            $pDown4 = $savedPaths['p5'] ?? null;
+
+            $sql = "UPDATE machineinformation
+                    SET p_down0 = :p0,
+                        p_down1 = :p1,
+                        p_down2 = :p2,
+                        p_down3 = :p3,
+                        p_down4 = :p4
+                    WHERE mid = :mid";
+
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([
+                ':p0' => $pDown0,
+                ':p1' => $pDown1,
+                ':p2' => $pDown2,
+                ':p3' => $pDown3,
+                ':p4' => $pDown4,
+            ]);
+
+            $snap['adverts_hash'] = $newHash;
+            $this->safeSnapshotWrite($snapshotFile, $snap);
+
+            $this->log->log('INFO', 'Updated machineinformation adverts paths', [
+                'mid' => $machineId,
+                'p_down0' => $pDown0,
+                'p_down1' => $pDown1,
+                'p_down2' => $pDown2,
+                'p_down3' => $pDown3,
+                'p_down4' => $pDown4,
+            ]);
+        } catch (Throwable $e) {
+            $this->log->log('ERROR', 'Adverts step failed (non-fatal)', [
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 }
