@@ -1,3 +1,3 @@
 @echo off
-php bin\sync.php run-once
+php\php.exe bin\sync.php run-once
 pause

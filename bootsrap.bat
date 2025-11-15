@@ -1,0 +1,1 @@
+php\php.exe bin\sync.php bootstrap

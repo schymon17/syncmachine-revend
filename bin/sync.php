@@ -62,7 +62,7 @@ switch ($cmd) {
         $cfgArr = $config->load();
         $interval = max(10, (int)($cfgArr['sync']['intervalSeconds'] ?? 60));
         $sync = new Sync($cfgArr, $log);
-        $log->log('INFO', 'Daemon started', ['interval'=>$interval]);
+        $log->log('INFO', 'Daemon started', ['interval' => $interval]);
         while (true) {
             $sync->runOnce();
             sleep($interval);

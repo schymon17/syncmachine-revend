@@ -1,6 +1,6 @@
 {
     "api": {
-        "baseUrl": "https://revend/api/revend/machine/v1/config",
+        "baseUrl": "https://panel.revend.pl/api/revend/machine/v1/config",
         "token": "hZ@3wKp!9FvR^tQ1LxU#eMb7YjN&dS6oGcA%P4zT8rV+XfW2nHqZmC0iD$BsE5J"
     }
 }

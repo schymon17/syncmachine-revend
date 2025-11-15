@@ -1,39 +1,34 @@
 {
-    "configDone": true,
-    "integration": "kaucja",
-    "machineId": "RVM_4000_1161321896",
+    "configDone": false,
+    "integration": "",
+    "machineId": "",
     "db": {
-        "driver": "mysql",
-        "host": "127.0.0.1",
-        "port": 3307,
-        "database": "machinesql",
-        "username": "root",
-        "password": "root"
+        "driver": "",
+        "host": "",
+        "port": "",
+        "database": "",
+        "username": "",
+        "password": ""
     },
     "api": {
-        "baseUrl": "https://revend/api/revend/machine/v1",
-        "token": "hZ@3wKp!9FvR^tQ1LxU#eMb7YjN&dS6oGcA%P4zT8rV+XfW2nHqZmC0iD$BsE5J"
+        "baseUrl": "",
+        "token": ""
     },
     "sync": {
         "intervalSecondsTrans": 60,
-        "enabledTrans": false,
+        "enabledTrans": true,
         "intervalSecondsEans": 60,
         "enabledEans": true,
         "intervalSecondsStatus": 60,
-        "enabledStatus": false,
+        "enabledStatus": true,
         "intervalSecondsAdverts": 60,
-        "enabledAdverts": false,
+        "enabledAdverts": true,
         "intervalSecondsCoupons": 60,
-        "enabledCoupons": false
+        "enabledCoupons": true
     },
     "address": "",
     "notification_emails": [],
-    "notification_emails_bcc": [
-        {
-            "name": "Szymon Szymczyna",
-            "email": "szymon.szymczyna@revend.pl"
-        }
-    ],
+    "notification_emails_bcc": [],
     "paths": {
         "snapshot": "data/snapshot.json",
         "queue": "data/offline-queue.json",
