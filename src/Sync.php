@@ -475,8 +475,8 @@ class Sync {
     {
         try {
             $res = $http->postJson('/adverts', [
-                'machineId'   => $machineId,
-                'timestamp'   => gmdate('c'),
+                'machineId' => $machineId,
+                'timestamp' => gmdate('c'),
                 'integration' => $this->cfg['integration'] ?? null,
             ]);
 
@@ -512,7 +512,7 @@ class Sync {
                 return;
             }
 
-            $baseDir = 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic';
+            $baseDir = 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic\\img';
             if (!is_dir($baseDir)) {
                 @mkdir($baseDir, 0777, true);
             }
@@ -559,18 +559,15 @@ class Sync {
                     $fileName = $slot . '_' . $basename;
                 }
 
-                $targetPath = rtrim($baseDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
+                $targetPath   = rtrim($baseDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
+                $relativePath = 'img/' . $fileName;
 
                 try {
-                    $data = @file_get_contents($url);
-                    if ($data === false) {
-                        throw new RuntimeException('file_get_contents failed');
-                    }
+                    $data = $this->downloadBinary($url);
 
                     $this->atomicWrite($targetPath, $data);
                     $this->log->log('INFO', sprintf('Downloaded advert %s to %s', $slot, $targetPath));
-
-                    $savedPaths[$slot] = $targetPath;
+                    $savedPaths[$slot] = $relativePath;
                 } catch (Throwable $e) {
                     $this->log->log('WARN', sprintf('Failed to download advert %s', $slot), [
                         'error' => $e->getMessage(),
@@ -587,21 +584,58 @@ class Sync {
             $pDown4 = $savedPaths['p5'] ?? null;
 
             $sql = "UPDATE machineinformation
-                    SET p_down0 = :p0,
-                        p_down1 = :p1,
-                        p_down2 = :p2,
-                        p_down3 = :p3,
-                        p_down4 = :p4
-                    WHERE mid = :mid";
+                SET p_down0 = ?,
+                    p_down1 = ?,
+                    p_down2 = ?,
+                    p_down3 = ?,
+                    p_down4 = ?
+                WHERE mid = ?";
 
             $stmt = $pdo->prepare($sql);
             $stmt->execute([
-                ':p0' => $pDown0,
-                ':p1' => $pDown1,
-                ':p2' => $pDown2,
-                ':p3' => $pDown3,
-                ':p4' => $pDown4,
+                $pDown0,
+                $pDown1,
+                $pDown2,
+                $pDown3,
+                $pDown4,
+                $machineId,
             ]);
+
+            $affected = $stmt->rowCount();
+
+            if ($affected === 0) {
+                $this->log->log('WARN', 'No machineinformation row matched mid, applying fallback update without WHERE', [
+                    'mid' => $machineId,
+                ]);
+
+                $fallbackSql = "UPDATE machineinformation
+                            SET p_down0 = ?,
+                                p_down1 = ?,
+                                p_down2 = ?,
+                                p_down3 = ?,
+                                p_down4 = ?
+                            LIMIT 1";
+
+                $stmt2 = $pdo->prepare($fallbackSql);
+                $stmt2->execute([
+                    $pDown0,
+                    $pDown1,
+                    $pDown2,
+                    $pDown3,
+                    $pDown4,
+                ]);
+
+                $affectedFallback = $stmt2->rowCount();
+
+                $this->log->log('INFO', 'Fallback machineinformation update', [
+                    'affected' => $affectedFallback,
+                ]);
+            } else {
+                $this->log->log('INFO', 'machineinformation update by mid', [
+                    'mid'      => $machineId,
+                    'affected' => $affected,
+                ]);
+            }
 
             $snap['adverts_hash'] = $newHash;
             $this->safeSnapshotWrite($snapshotFile, $snap);
@@ -619,5 +653,43 @@ class Sync {
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    private function downloadBinary(string $url): string
+    {
+        $ch = curl_init();
+
+        if ($ch === false) {
+            throw new RuntimeException('curl_init failed');
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+        ]);
+
+        $data = curl_exec($ch);
+
+        if ($data === false) {
+            $err = curl_error($ch);
+            $code = curl_errno($ch);
+            curl_close($ch);
+            throw new RuntimeException('cURL download failed: '.$err.' (code '.$code.')');
+        }
+
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode < 200 || $httpCode >= 300) {
+            throw new RuntimeException('HTTP status '.$httpCode.' while downloading '.$url);
+        }
+
+        return $data;
     }
 }
