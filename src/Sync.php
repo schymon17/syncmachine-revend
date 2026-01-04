@@ -160,7 +160,7 @@ class Sync
      */
     private function ensureOutboxInstalledEvery12hSafe(PDO $pdo, string $snapshotFile, array &$snap): void
     {
-        $now  = time();
+        $now = time();
         $last = (int)($snap['outbox_install_last_check_ts'] ?? 0);
 
         if ($last > 0 && ($now - $last) < 12 * 3600) return;
@@ -171,24 +171,51 @@ class Sync
         $forceRecreate = (bool)($this->cfg['sync']['outboxForceRecreateTriggers'] ?? false);
 
         try {
-            // 1) table
+            // 1) table (create)
             $pdo->exec("
-                CREATE TABLE IF NOT EXISTS sync_outbox (
-                  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                  kind VARCHAR(50) NOT NULL,
-                  entity VARCHAR(50) NOT NULL,
-                  entity_id BIGINT NOT NULL,
-                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  payload_json LONGTEXT NOT NULL,
-                  sent_at TIMESTAMP NULL DEFAULT NULL,
-                  send_attempts INT NOT NULL DEFAULT 0,
-                  last_error VARCHAR(255) NULL DEFAULT NULL,
-                  PRIMARY KEY (id),
-                  KEY idx_sent_at (sent_at),
-                  KEY idx_kind_sent (kind, sent_at),
-                  KEY idx_entity (entity, entity_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-            ");
+            CREATE TABLE IF NOT EXISTS sync_outbox (
+              id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+              kind VARCHAR(50) NOT NULL,
+              entity VARCHAR(50) NOT NULL,
+              entity_id BIGINT NOT NULL,
+              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              payload_json LONGTEXT NOT NULL,
+              sent_at TIMESTAMP NULL DEFAULT NULL,
+              send_attempts INT NOT NULL DEFAULT 0,
+              last_error VARCHAR(255) NULL DEFAULT NULL,
+              -- pending = 1 when unsent, 0 when sent
+              pending TINYINT(1) GENERATED ALWAYS AS (CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END) STORED,
+              PRIMARY KEY (id),
+              KEY idx_sent_at (sent_at),
+              KEY idx_kind_sent (kind, sent_at),
+              KEY idx_entity (entity, entity_id),
+              UNIQUE KEY uq_one_pending (kind, entity, entity_id, pending)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+            // 1b) If table existed before, make sure pending/unique exists (safe best-effort)
+            // - add column pending if missing
+            // - add unique key if missing
+            try {
+                $col = $pdo->query("SHOW COLUMNS FROM sync_outbox LIKE 'pending'")->fetch(PDO::FETCH_ASSOC);
+                if (!$col) {
+                    // MySQL requires STORED for indexing
+                    $pdo->exec("
+                    ALTER TABLE sync_outbox
+                    ADD COLUMN pending TINYINT(1)
+                      GENERATED ALWAYS AS (CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END) STORED
+                ");
+                }
+            } catch (Throwable) {
+            }
+
+            try {
+                $idxRows = $pdo->query("SHOW INDEX FROM sync_outbox WHERE Key_name='uq_one_pending'")->fetchAll(PDO::FETCH_ASSOC);
+                if (!$idxRows) {
+                    $pdo->exec("ALTER TABLE sync_outbox ADD UNIQUE KEY uq_one_pending (kind, entity, entity_id, pending)");
+                }
+            } catch (Throwable) {
+            }
 
             // 2) triggers existence
             $hasIns = false;
@@ -203,80 +230,95 @@ class Sync
                     if ($name === 'trg_user_transaction_outbox_upd') $hasUpd = true;
                 }
             } catch (Throwable) {
-                // ignore
             }
 
             // 3) drop triggers only if forced
             if ($forceRecreate) {
-                try { $pdo->exec("DROP TRIGGER IF EXISTS trg_user_transaction_outbox_ins"); } catch (Throwable) {}
-                try { $pdo->exec("DROP TRIGGER IF EXISTS trg_user_transaction_outbox_upd"); } catch (Throwable) {}
+                try {
+                    $pdo->exec("DROP TRIGGER IF EXISTS trg_user_transaction_outbox_ins");
+                } catch (Throwable) {
+                }
+                try {
+                    $pdo->exec("DROP TRIGGER IF EXISTS trg_user_transaction_outbox_upd");
+                } catch (Throwable) {
+                }
                 $hasIns = false;
                 $hasUpd = false;
             }
 
-            // IMPORTANT: PDO does NOT support DELIMITER, so we must include END; in the statement.
+            // IMPORTANT: PDO does NOT support DELIMITER
+            // Use UPSERT so we keep ONLY ONE pending row per entity_id
             $insertTriggerSql = "
-                CREATE TRIGGER trg_user_transaction_outbox_ins
-                AFTER INSERT ON user_transaction
-                FOR EACH ROW
-                BEGIN
-                  INSERT INTO sync_outbox (kind, entity, entity_id, payload_json)
-                  VALUES (
-                    'transactions',
-                    'user_transaction',
-                    NEW.id,
-                    CONCAT(
-                      '{',
-                        '\"id\":', NEW.id, ',',
-                        '\"print_barcode\":', IF(NEW.print_barcode IS NULL, 'null',
-                          CONCAT('\"',
-                            REPLACE(REPLACE(NEW.print_barcode, '\\\\', '\\\\\\\\'), '\"', '\\\\\"'),
-                          '\"')
-                        ), ',',
-                        '\"dateline\":', IF(NEW.dateline IS NULL, 'null', NEW.dateline),
-                      '}'
-                    )
-                  );
-                END;
-            ";
+            CREATE TRIGGER trg_user_transaction_outbox_ins
+            AFTER INSERT ON user_transaction
+            FOR EACH ROW
+            BEGIN
+              INSERT INTO sync_outbox (kind, entity, entity_id, payload_json)
+              VALUES (
+                'transactions',
+                'user_transaction',
+                NEW.id,
+                CONCAT(
+                  '{',
+                    '\"id\":', NEW.id, ',',
+                    '\"print_barcode\":', IF(NEW.print_barcode IS NULL, 'null',
+                      CONCAT('\"',
+                        REPLACE(REPLACE(NEW.print_barcode, '\\\\', '\\\\\\\\'), '\"', '\\\\\"'),
+                      '\"')
+                    ), ',',
+                    '\"dateline\":', IF(NEW.dateline IS NULL, 'null', NEW.dateline),
+                  '}'
+                )
+              )
+              ON DUPLICATE KEY UPDATE
+                payload_json = VALUES(payload_json),
+                created_at   = CURRENT_TIMESTAMP,
+                last_error   = NULL;
+            END;
+        ";
 
-            // NULL-safe change detection (<=>)
             $updateTriggerSql = "
-                CREATE TRIGGER trg_user_transaction_outbox_upd
-                AFTER UPDATE ON user_transaction
-                FOR EACH ROW
-                BEGIN
-                  IF NOT (OLD.print_barcode <=> NEW.print_barcode)
-                     OR NOT (OLD.dateline <=> NEW.dateline) THEN
-                    INSERT INTO sync_outbox (kind, entity, entity_id, payload_json)
-                    VALUES (
-                      'transactions',
-                      'user_transaction',
-                      NEW.id,
-                      CONCAT(
-                        '{',
-                          '\"id\":', NEW.id, ',',
-                          '\"print_barcode\":', IF(NEW.print_barcode IS NULL, 'null',
-                            CONCAT('\"',
-                              REPLACE(REPLACE(NEW.print_barcode, '\\\\', '\\\\\\\\'), '\"', '\\\\\"'),
-                            '\"')
-                          ), ',',
-                          '\"dateline\":', IF(NEW.dateline IS NULL, 'null', NEW.dateline),
-                        '}'
-                      )
-                    );
-                  END IF;
-                END;
-            ";
+            CREATE TRIGGER trg_user_transaction_outbox_upd
+            AFTER UPDATE ON user_transaction
+            FOR EACH ROW
+            BEGIN
+              -- if ANYTHING changes that you consider relevant,
+              -- you can extend this IF, but UPSERT will still prevent duplicates
+              IF NOT (OLD.print_barcode <=> NEW.print_barcode)
+                 OR NOT (OLD.dateline <=> NEW.dateline) THEN
+
+                INSERT INTO sync_outbox (kind, entity, entity_id, payload_json)
+                VALUES (
+                  'transactions',
+                  'user_transaction',
+                  NEW.id,
+                  CONCAT(
+                    '{',
+                      '\"id\":', NEW.id, ',',
+                      '\"print_barcode\":', IF(NEW.print_barcode IS NULL, 'null',
+                        CONCAT('\"',
+                          REPLACE(REPLACE(NEW.print_barcode, '\\\\', '\\\\\\\\'), '\"', '\\\\\"'),
+                        '\"')
+                      ), ',',
+                      '\"dateline\":', IF(NEW.dateline IS NULL, 'null', NEW.dateline),
+                    '}'
+                  )
+                )
+                ON DUPLICATE KEY UPDATE
+                  payload_json = VALUES(payload_json),
+                  created_at   = CURRENT_TIMESTAMP,
+                  last_error   = NULL;
+
+              END IF;
+            END;
+        ";
 
             if (!$hasIns) {
                 try {
                     $pdo->exec($insertTriggerSql);
                     $this->log->log('INFO', 'Created trigger trg_user_transaction_outbox_ins');
                 } catch (Throwable $e) {
-                    $this->log->log('ERROR', 'Failed to create trg_user_transaction_outbox_ins', [
-                        'error' => $e->getMessage(),
-                    ]);
+                    $this->log->log('ERROR', 'Failed to create trg_user_transaction_outbox_ins', ['error' => $e->getMessage()]);
                 }
             }
 
@@ -285,9 +327,7 @@ class Sync
                     $pdo->exec($updateTriggerSql);
                     $this->log->log('INFO', 'Created trigger trg_user_transaction_outbox_upd');
                 } catch (Throwable $e) {
-                    $this->log->log('ERROR', 'Failed to create trg_user_transaction_outbox_upd', [
-                        'error' => $e->getMessage(),
-                    ]);
+                    $this->log->log('ERROR', 'Failed to create trg_user_transaction_outbox_upd', ['error' => $e->getMessage()]);
                 }
             }
 
@@ -298,9 +338,7 @@ class Sync
             ]);
 
         } catch (Throwable $e) {
-            $this->log->log('ERROR', 'Outbox ensure failed (non-fatal)', [
-                'error' => $e->getMessage(),
-            ]);
+            $this->log->log('ERROR', 'Outbox ensure failed (non-fatal)', ['error' => $e->getMessage()]);
         }
     }
 
@@ -792,36 +830,30 @@ class Sync
     {
         try {
             $res = $http->postJson('/adverts', [
-                'machineId' => $machineId,
-                'timestamp' => gmdate('c'),
-                'integration' => $this->cfg['integration'] ?? null,
+                'machineId'    => $machineId,
+                'timestamp'    => gmdate('c'),
+                'integration'  => $this->cfg['integration'] ?? null,
             ]);
 
             $status = (int)($res['status'] ?? 0);
             if ($status < 200 || $status >= 300) throw new RuntimeException('Bad status ' . $status);
 
             $body = $res['body'] ?? null;
-            if ($body === null) throw new RuntimeException('Empty adverts body');
+            if (!is_array($body)) throw new RuntimeException('Empty / invalid adverts body');
 
-            if (isset($body['adverts'])) {
-                $adverts = $body['adverts'];
-            } elseif (isset($body['data']['adverts'])) {
-                $adverts = $body['data']['adverts'];
-            } else {
+            // Your API: { machineId: "...", adverts: { p1:{...}, ... } }
+            $adverts = $body['adverts'] ?? ($body['data']['adverts'] ?? null);
+            if (!is_array($adverts) || !$adverts) {
                 $this->log->log('INFO', 'No adverts section in API response');
                 return;
             }
 
-            if (!is_array($adverts) || !$adverts) {
-                $this->log->log('INFO', 'Adverts list is empty');
-                return;
-            }
-
-            $newHash = hash('sha256', json_encode($adverts));
+            // If you want a global "no work if nothing changed", keep this hash too
+            $newHash = hash('sha256', json_encode($adverts, JSON_UNESCAPED_UNICODE));
             $oldHash = $snap['adverts_hash'] ?? null;
 
             if ($newHash === $oldHash) {
-                $this->log->log('INFO', 'Adverts unchanged - skipping download and DB update');
+                $this->log->log('INFO', 'Adverts unchanged (global hash) - skipping');
                 return;
             }
 
@@ -830,35 +862,58 @@ class Sync
                 @mkdir($baseDir, 0777, true);
             }
 
-            $savedPaths = [
-                'p1' => null,
-                'p2' => null,
-                'p3' => null,
-                'p4' => null,
-                'p5' => null,
-            ];
+            // Load current machineinformation paths so DB never gets wiped
+            $current = ['p1'=>null,'p2'=>null,'p3'=>null,'p4'=>null,'p5'=>null];
+            $rowExists = false;
 
-            foreach ($adverts as $slotKey => $ad) {
-                if (!is_array($ad)) continue;
+            try {
+                $st = $pdo->prepare("SELECT p_down0, p_down1, p_down2, p_down3, p_down4 FROM machineinformation WHERE mid = ? LIMIT 1");
+                $st->execute([$machineId]);
+                $r = $st->fetch(PDO::FETCH_ASSOC);
+                if (is_array($r)) {
+                    $rowExists = true;
+                    $current['p1'] = $r['p_down0'] ?? null;
+                    $current['p2'] = $r['p_down1'] ?? null;
+                    $current['p3'] = $r['p_down2'] ?? null;
+                    $current['p4'] = $r['p_down3'] ?? null;
+                    $current['p5'] = $r['p_down4'] ?? null;
+                }
+            } catch (Throwable) {
+                // non-fatal
+            }
 
-                $slot = $ad['slot'] ?? $slotKey;
-                if (!in_array($slot, ['p1', 'p2', 'p3', 'p4', 'p5'], true)) continue;
+            $resultPaths = $current;
 
-                if (!empty($ad['placeholder'])) {
-                    $this->log->log('INFO', sprintf('Advert %s is placeholder, skipping download', $slot));
-                    $savedPaths[$slot] = null;
+            // Only these go to DB columns p_down0..p_down4
+            $slotsToHandle = ['p1','p2','p3','p4','p5'];
+
+            foreach ($slotsToHandle as $slot) {
+                $ad = $adverts[$slot] ?? null;
+                if (!is_array($ad)) {
+                    // API didn't send this slot -> keep local
                     continue;
                 }
 
-                $url = $ad['url'] ?? null;
-                if (!$url) {
-                    $this->log->log('WARN', sprintf('Advert %s has no URL, skipping', $slot));
+                $url   = is_string($ad['url'] ?? null) ? (string)$ad['url'] : '';
+                $name  = is_string($ad['name'] ?? null) ? (string)$ad['name'] : '';
+                $type  = is_string($ad['type'] ?? null) ? (string)$ad['type'] : '';
+                $size  = (int)($ad['size'] ?? 0);
+                $ph    = (bool)($ad['placeholder'] ?? false);
+
+                if ($url === '') {
+                    $this->log->log('WARN', "Advert {$slot} has no URL, keeping local path");
                     continue;
                 }
 
-                $nameFromApi = $ad['name'] ?? null;
-                if ($nameFromApi) {
-                    $fileName = $slot . '_' . $nameFromApi;
+                // Signature: if any of these change, we consider it a new asset
+                $sig = hash('sha256', $url . '|' . $name . '|' . $type . '|' . $size . '|' . ($ph ? '1' : '0'));
+                $sigKey = "adverts_slot_sig_{$slot}";
+                $prevSig = (string)($snap[$sigKey] ?? '');
+
+                // File name: keep stable, based on API name if present; otherwise based on URL basename
+                $fileName = '';
+                if ($name !== '') {
+                    $fileName = $slot . '_' . $name; // p1_p1.jpg etc.
                 } else {
                     $basename = basename(parse_url($url, PHP_URL_PATH) ?: '');
                     if ($basename === '' || $basename === '/') $basename = $slot . '.bin';
@@ -868,75 +923,117 @@ class Sync
                 $targetPath   = rtrim($baseDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
                 $relativePath = 'img/' . $fileName;
 
+                // Decide if we need download:
+                // - if signature same AND local file exists AND (size matches when provided) => skip
+                $localOk = false;
+                if ($prevSig !== '' && $prevSig === $sig && file_exists($targetPath)) {
+                    if ($size > 0) {
+                        $localOk = ((int)@filesize($targetPath) === $size);
+                    } else {
+                        $localOk = true; // unknown size -> existence is enough
+                    }
+                }
+
+                if ($localOk) {
+                    // Ensure DB path points to it
+                    $resultPaths[$slot] = $relativePath;
+                    $this->log->log('INFO', "Advert {$slot} unchanged - skip download", [
+                        'placeholder' => $ph,
+                        'path' => $targetPath,
+                    ]);
+                    continue;
+                }
+
+                // Download (even if placeholder=true)
                 try {
                     $data = $this->downloadBinary($url);
+
+                    // Optional: if API size is provided, validate the downloaded size
+                    if ($size > 0 && strlen($data) !== $size) {
+                        $this->log->log('WARN', "Advert {$slot} downloaded but size mismatch", [
+                            'expected' => $size,
+                            'got' => strlen($data),
+                            'url' => $url,
+                        ]);
+                        // still write it, because sometimes proxies gzip etc.; adjust if you want strict mode
+                    }
+
                     $this->atomicWrite($targetPath, $data);
-                    $this->log->log('INFO', sprintf('Downloaded advert %s to %s', $slot, $targetPath));
-                    $savedPaths[$slot] = $relativePath;
-                } catch (Throwable $e) {
-                    $this->log->log('WARN', sprintf('Failed to download advert %s', $slot), [
-                        'error' => $e->getMessage(),
+
+                    // Update snapshot signature and DB path
+                    $snap[$sigKey] = $sig;
+                    $resultPaths[$slot] = $relativePath;
+
+                    $this->log->log('INFO', "Downloaded advert {$slot}", [
+                        'placeholder' => $ph,
                         'url' => $url,
+                        'path' => $targetPath,
+                        'size' => $size ?: strlen($data),
+                    ]);
+
+                } catch (Throwable $e) {
+                    // Keep existing local path, do NOT wipe
+                    $this->log->log('WARN', "Failed to download advert {$slot}, keeping local path", [
+                        'placeholder' => $ph,
+                        'url' => $url,
+                        'error' => $e->getMessage(),
+                        'kept' => $resultPaths[$slot] ?? null,
                     ]);
                 }
             }
 
-            $pDown0 = $savedPaths['p1'] ?? null;
-            $pDown1 = $savedPaths['p2'] ?? null;
-            $pDown2 = $savedPaths['p3'] ?? null;
-            $pDown3 = $savedPaths['p4'] ?? null;
-            $pDown4 = $savedPaths['p5'] ?? null;
+            // Persist to DB (never wipe to NULL if we already have something)
+            $pDown0 = $resultPaths['p1'] ?? null;
+            $pDown1 = $resultPaths['p2'] ?? null;
+            $pDown2 = $resultPaths['p3'] ?? null;
+            $pDown3 = $resultPaths['p4'] ?? null;
+            $pDown4 = $resultPaths['p5'] ?? null;
 
-            $sql = "UPDATE machineinformation
+            // Optional insert if missing (may fail if your table has more NOT NULL columns)
+            if (!$rowExists) {
+                try {
+                    $ins = $pdo->prepare("
+                    INSERT INTO machineinformation (mid, p_down0, p_down1, p_down2, p_down3, p_down4)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ");
+                    $ins->execute([$machineId, $pDown0, $pDown1, $pDown2, $pDown3, $pDown4]);
+                    $rowExists = true;
+                    $this->log->log('INFO', 'Inserted machineinformation row for mid', ['mid' => $machineId]);
+                } catch (Throwable $e) {
+                    $this->log->log('ERROR', 'Failed to insert machineinformation row (non-fatal)', [
+                        'mid' => $machineId,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            if ($rowExists) {
+                $stmt = $pdo->prepare("
+                UPDATE machineinformation
                 SET p_down0 = ?,
                     p_down1 = ?,
                     p_down2 = ?,
                     p_down3 = ?,
                     p_down4 = ?
-                WHERE mid = ?";
+                WHERE mid = ?
+            ");
+                $stmt->execute([$pDown0, $pDown1, $pDown2, $pDown3, $pDown4, $machineId]);
 
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute([$pDown0, $pDown1, $pDown2, $pDown3, $pDown4, $machineId]);
-
-            $affected = $stmt->rowCount();
-
-            if ($affected === 0) {
-                $this->log->log('WARN', 'No machineinformation row matched mid, applying fallback update without WHERE', [
+                $this->log->log('INFO', 'machineinformation adverts synced', [
                     'mid' => $machineId,
-                ]);
-
-                $fallbackSql = "UPDATE machineinformation
-                            SET p_down0 = ?,
-                                p_down1 = ?,
-                                p_down2 = ?,
-                                p_down3 = ?,
-                                p_down4 = ?
-                            LIMIT 1";
-
-                $stmt2 = $pdo->prepare($fallbackSql);
-                $stmt2->execute([$pDown0, $pDown1, $pDown2, $pDown3, $pDown4]);
-
-                $this->log->log('INFO', 'Fallback machineinformation update', [
-                    'affected' => $stmt2->rowCount(),
-                ]);
-            } else {
-                $this->log->log('INFO', 'machineinformation update by mid', [
-                    'mid' => $machineId,
-                    'affected' => $affected,
+                    'rowCount' => $stmt->rowCount(), // can be 0 even when row exists (no change)
+                    'p_down0' => $pDown0,
+                    'p_down1' => $pDown1,
+                    'p_down2' => $pDown2,
+                    'p_down3' => $pDown3,
+                    'p_down4' => $pDown4,
                 ]);
             }
 
+            // Update global hash AFTER processing
             $snap['adverts_hash'] = $newHash;
             $this->safeSnapshotWrite($snapshotFile, $snap);
 
-            $this->log->log('INFO', 'Updated machineinformation adverts paths', [
-                'mid' => $machineId,
-                'p_down0' => $pDown0,
-                'p_down1' => $pDown1,
-                'p_down2' => $pDown2,
-                'p_down3' => $pDown3,
-                'p_down4' => $pDown4,
-            ]);
         } catch (Throwable $e) {
             $this->log->log('ERROR', 'Adverts step failed (non-fatal)', ['error' => $e->getMessage()]);
         }
