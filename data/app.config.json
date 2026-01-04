@@ -24,7 +24,8 @@
         "intervalSecondsAdverts": 60,
         "enabledAdverts": true,
         "intervalSecondsCoupons": 60,
-        "enabledCoupons": true
+        "enabledCoupons": true,
+        "outboxForceRecreateTriggers": true
     },
     "address": "",
     "notification_emails": [],
