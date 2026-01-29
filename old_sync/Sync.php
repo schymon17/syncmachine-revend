@@ -155,7 +155,7 @@ class Sync {
     /* -------------------- Steps (isolated & non-blocking) -------------------- */
 
     private function runTransactions(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): bool {
-        try {
+		try {
             $lastSync = (int)($snap['user_transaction_lastSync'] ?? 0);
 
             $latestDateline = (int)($pdo

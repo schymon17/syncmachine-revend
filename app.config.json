@@ -1,0 +1,42 @@
+{
+    "configDone": true,
+    "integration": "polka",
+    "machineId": "RVM_500_8447595160",
+    "db": {
+        "driver": "mysql",
+        "host": "127.0.0.1",
+        "port": 3306,
+        "database": "qcs",
+        "username": "root",
+        "password": "chushengfeng123"
+    },
+    "api": {
+        "baseUrl": "https://panel.revend.pl/api/revend/machine/v1",
+        "token": "hZ@3wKp!9FvR^tQ1LxU#eMb7YjN&dS6oGcA%P4zT8rV+XfW2nHqZmC0iD$BsE5J"
+    },
+    "sync": {
+        "intervalSecondsTrans": 60,
+        "enabledTrans": true,
+        "intervalSecondsEans": 60,
+        "enabledEans": true,
+        "intervalSecondsStatus": 60,
+        "enabledStatus": true,
+        "intervalSecondsAdverts": 60,
+        "enabledAdverts": true,
+        "intervalSecondsCoupons": 60,
+        "enabledCoupons": true
+    },
+    "address": "Kombatant\u00f3w Polskich 3D, 78-300 \u015awidwin",
+    "notification_emails": [],
+    "notification_emails_bcc": [
+        {
+            "name": "Szymon Szymczyna",
+            "email": "szymon.szymczyna@revend.pl"
+        }
+    ],
+    "paths": {
+        "snapshot": "data/snapshot.json",
+        "queue": "data/offline-queue.json",
+        "log": "data/log.json"
+    }
+}
