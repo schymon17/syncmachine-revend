@@ -145,7 +145,7 @@ class Sync {
             $this->log->log('INFO','Sync disabled - Adverts are disabled or DB not ready');
         }
 
-        $this->runBins($pdo, $http, $snapshotFile, $snap, $machineId);
+        $this->runBins($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
 
         try {
             $this->safeHeartbeat($http, $queueFile, $machineId);
@@ -383,25 +383,26 @@ class Sync {
     }
 
     private function runBins(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): void {
-        try {
+//        try {
             // fetch all rows from empty_records
-            $stmt = $pdo->query("SELECT id, mid, dateline, bin_type, barcode FROM empty_records ORDER BY id ASC");
+            $stmt = $pdo->query("SELECT id, mid, dateline, bin_type, barcode FROM empty_record ORDER BY id ASC");
             $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
             // hash of the whole dataset to detect changes
             $newHash = hash('sha256', json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
             $oldHash = $snap['empty_records_hash'] ?? null;
 
-            if ($newHash === $oldHash) {
-                $this->log->log('INFO', 'No bins change');
-                return;
-            }
+//            if ($newHash === $oldHash) {
+//                $this->log->log('INFO', 'No bins change');
+//                return;
+//            }
 
             $payload = [
                 'machineId' => $machineId,
+                'integration' => $this->cfg['integration'] ?? null,
                 'timestamp' => gmdate('c'),
-                'kind'      => 'sync_bins',
-                'data'      => [
+                'kind' => 'sync_bins',
+                'data' => [
                     'empty_records' => $rows,
                 ],
             ];
@@ -414,16 +415,16 @@ class Sync {
                 $snap['empty_records_hash'] = $newHash;
                 $this->safeSnapshotWrite($snapshotFile, $snap);
             } else {
-                throw new RuntimeException('Bad status ' . $status);
+                throw new RuntimeException('Bad status bin' . $status);
             }
-        } catch (Throwable $e) {
-            $this->queueOffline($queueFile, [
-                'machineId'  => $machineId,
-                'timestamp'  => gmdate('c'),
-                'kind'       => 'sync_bins',
-            ]);
-            $this->log->log('WARN', 'Queued bins sync (offline)', ['error' => $e->getMessage()]);
-        }
+//        } catch (Throwable $e) {
+//            $this->queueOffline($queueFile, [
+//                'machineId'  => $machineId,
+//                'timestamp'  => gmdate('c'),
+//                'kind'       => 'sync_bins',
+//            ]);
+//            $this->log->log('WARN', 'Queued bins sync (offline)', ['error' => $e->getMessage()]);
+//        }
 
         // try to flush after attempts
         try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
