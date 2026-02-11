@@ -376,46 +376,65 @@ class Sync {
     }
 
     private function runStatus(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): void {
+        $now = gmdate('c');
         try {
-            $stmt = $pdo->query("SELECT * FROM command ORDER BY id DESC LIMIT 1");
+            $stmt = $pdo->query('SELECT * FROM "command" ORDER BY id DESC LIMIT 1');
             $statusRow = $stmt?->fetch(PDO::FETCH_ASSOC) ?: [];
-
-            $newHash = hash('sha256', json_encode($statusRow));
-            $oldHash = $snap['status_hash'] ?? null;
-
-            if ($newHash === $oldHash) {
-                $this->log->log('INFO', 'No status change');
-                return;
-            }
-
-            $payload = [
-                'machineId' => $machineId,
-                'timestamp' => gmdate('c'),
-                'kind'      => 'status',
-                'data'      => ['command'=>$statusRow],
-            ];
-
-            if (!empty($this->cfg['address']))                  $payload['address']                 = $this->cfg['address'];
-            if (!empty($this->cfg['notification_emails']))      $payload['notification_emails']     = $this->cfg['notification_emails'];
-            if (!empty($this->cfg['notification_emails_bcc']))  $payload['notification_emails_bcc'] = $this->cfg['notification_emails_bcc'];
-
-            $res = $http->postJson('/status', $payload);
-            $status = (int)($res['status'] ?? 0);
-            if ($status >= 200 && $status < 300) {
-                $this->log->log('INFO', 'Pushed status');
-                $snap['status_hash'] = $newHash;
-                $this->safeSnapshotWrite($snapshotFile, $snap);
-            } else {
-                throw new RuntimeException('Bad status '.$status);
-            }
         } catch (Throwable $e) {
             $this->queueOffline($queueFile, [
-                'machineId'=>$machineId,'timestamp'=>gmdate('c'),'kind'=>'status'
+                'machineId'  => $machineId,
+                'timestamp'  => $now,
+                'kind'       => 'status',
+                'data'       => ['command' => null],
+                'error'      => 'db_read_failed: '.$e->getMessage(),
             ]);
-            $this->log->log('WARN', 'Queued status (offline)', ['error'=>$e->getMessage()]);
+            $this->log->log('WARN', 'Queued status (DB read failed)', ['error' => $e->getMessage()]);
+
+            try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
+            return;
         }
 
-        // try to flush after attempts
+        $payload = [
+            'machineId' => $machineId,
+            'timestamp' => $now,
+            'kind'      => 'status',
+            'data'      => ['command' => $statusRow],
+        ];
+
+        if (!empty($this->cfg['address']))                  $payload['address']                 = $this->cfg['address'];
+        if (!empty($this->cfg['notification_emails']))      $payload['notification_emails']     = $this->cfg['notification_emails'];
+        if (!empty($this->cfg['notification_emails_bcc']))  $payload['notification_emails_bcc'] = $this->cfg['notification_emails_bcc'];
+
+        try {
+            $res = $http->postJson('/status', $payload);
+
+            $status = (int)($res['status'] ?? 0);
+            if ($status >= 200 && $status < 300) {
+                $this->log->log('INFO', 'Pushed status', [
+                    'command_id' => $statusRow['id'] ?? null,
+                    'http'       => $status,
+                ]);
+                $snap['status_last_push_at'] = $now;
+                $this->safeSnapshotWrite($snapshotFile, $snap);
+                try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
+                return;
+            }
+            $msg = $res['message'] ?? ($res['body'] ?? null);
+            throw new RuntimeException('Bad status '.$status.($msg ? ' - '.substr((string)$msg, 0, 200) : ''));
+        } catch (Throwable $e) {
+            $this->queueOffline($queueFile, [
+                'machineId'  => $machineId,
+                'timestamp'  => $now,
+                'kind'       => 'status',
+                'data'       => ['command' => $statusRow],
+                'error'      => $e->getMessage(),
+            ]);
+
+            $this->log->log('WARN', 'Queued status (offline)', [
+                'error'      => $e->getMessage(),
+                'command_id' => $statusRow['id'] ?? null,
+            ]);
+        }
         try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
     }
 
