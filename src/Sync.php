@@ -156,30 +156,60 @@ class Sync {
 
     /* -------------------- Steps (isolated & non-blocking) -------------------- */
 
-    private function runTransactions(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): bool {
+    private function runTransactions(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): bool
+    {
         try {
             $lastSync = (int)($snap['user_transaction_lastSync'] ?? 0);
+            $checkStmt = $pdo->prepare(
+                "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 LIMIT 1"
+            );
+            $checkStmt->execute([':lastSync' => $lastSync]);
+            $hasFinished = (bool)$checkStmt->fetchColumn();
 
-            $latestDateline = (int)($pdo
-                ->query("SELECT COALESCE(MAX(dateline),0) AS last_update FROM user_transaction")
-                ?->fetchColumn() ?? 0);
-
-            if ($latestDateline <= $lastSync) {
-                $this->log->log('INFO', 'No new changes detected');
+            if (!$hasFinished) {
+                $this->log->log('INFO', 'No finished transactions (transactiondone=2) detected');
                 return false;
             }
 
-            $limit = max(0, (int)($this->cfg['sync']['transBatch'] ?? 5000));
-            $sql = "SELECT * 
-        FROM user_transaction 
-        WHERE dateline > :lastSync 
-          AND transactiondone = 2
-        ORDER BY dateline ASC"
-                . ($limit > 0 ? " LIMIT $limit" : "");
-            $stmt  = $pdo->prepare($sql);
-            $stmt->execute([':lastSync'=>$lastSync]);
-            $rows  = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            $limitIds = max(0, (int)($this->cfg['sync']['transBatch'] ?? 5000));
 
+            $idsSql =
+                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 AND print_barcode IS NOT NULL AND print_barcode <> ''GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
+
+            $idsStmt = $pdo->prepare($idsSql);
+            $idsStmt->execute([':lastSync' => $lastSync]);
+            $idRows = $idsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            if (!$idRows) {
+                $this->log->log('INFO', 'No finished transaction IDs to send');
+                return false;
+            }
+
+            $transactionIds = [];
+            $maxSentDateline = 0;
+            foreach ($idRows as $row) {
+                $tid = (string)($row['transactionId'] ?? '');
+                if ($tid === '') continue;
+                $transactionIds[] = $tid;
+
+                $dl = (int)($row['max_dateline'] ?? 0);
+                if ($dl > $maxSentDateline) $maxSentDateline = $dl;
+            }
+
+            if (!$transactionIds) {
+                $this->log->log('INFO', 'No valid transaction IDs after filtering');
+                return false;
+            }
+
+            $placeholders = implode(',', array_fill(0, count($transactionIds), '?'));
+            $rowsStmt = $pdo->prepare("SELECT * FROM user_transaction WHERE print_barcode IN ($placeholders) ORDER BY dateline ASC");
+            $rowsStmt->execute($transactionIds);
+            $rows = $rowsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            if (!$rows) {
+                $this->log->log('INFO', 'No rows found for finished transaction IDs');
+                return false;
+            }
             $data = [];
             foreach ($rows as $r) {
                 $transactionId = $r['print_barcode'] ?? null;
@@ -195,42 +225,49 @@ class Sync {
                 if (!$prev || ($formattedTime && strtotime($formattedTime) > strtotime($prev))) {
                     $data[$transactionId]['last_transaction_time'] = $formattedTime;
                 }
+
+                if ($dateline > $maxSentDateline) $maxSentDateline = $dateline;
             }
 
-            if (empty($data)) {
+            if (!$data) {
                 $this->log->log('INFO', 'No new records to send (post-filter)');
                 return false;
             }
 
             $payload = [
-                'machineId'   => $machineId,
-                'timestamp'   => gmdate('c'),
-                'kind'        => 'transactions',
-                'data'        => ['transactions'=>$data,'mid'=>$machineId],
+                'machineId' => $machineId,
+                'timestamp' => gmdate('c'),
+                'kind' => 'transactions',
+                'data' => ['transactions' => $data, 'mid' => $machineId],
                 'integration' => $this->cfg['integration'] ?? null,
             ];
 
             $res = $http->postJson('/trans', $payload);
             $status = (int)($res['status'] ?? 0);
+
             if ($status >= 200 && $status < 300) {
-                $snap['user_transaction_lastSync'] = $latestDateline;
+                $snap['user_transaction_lastSync'] = $maxSentDateline;
                 $this->safeSnapshotWrite($snapshotFile, $snap);
+
                 $this->log->log('INFO', 'Sent transactions', [
-                    'count' => count($data), 'from' => $lastSync, 'to' => $latestDateline
+                    'transactions' => count($data),
+                    'rows' => count($rows),
+                    'from' => $lastSync,
+                    'to' => $maxSentDateline,
                 ]);
+
                 return true;
             }
 
-            throw new RuntimeException('Bad status '.$status);
+            throw new RuntimeException('Bad status ' . $status);
         } catch (Throwable $e) {
-            // never block – queue and move on
             $this->queueOffline($queueFile, [
-                'machineId'=>$machineId,
-                'timestamp'=>gmdate('c'),
-                'kind'=>'transactions',
-                'error'=>$e->getMessage()
+                'machineId' => $machineId,
+                'timestamp' => gmdate('c'),
+                'kind' => 'transactions',
+                'error' => $e->getMessage(),
             ]);
-            $this->log->log('WARN', 'Queued transactions (offline)', ['error'=>$e->getMessage()]);
+            $this->log->log('WARN', 'Queued transactions (offline)', ['error' => $e->getMessage()]);
             return false;
         }
     }
