@@ -24,13 +24,37 @@ class Sync {
         }
     }
 
-    private function queueOffline(string $path, array $payload): void {
+    private function queueOffline(string $path, string $endpoint, array $payload, ?string $kind = null, ?string $error = null): void {
         try {
-            $line = json_encode($payload, JSON_UNESCAPED_UNICODE).PHP_EOL;
+            $entry = [
+                'endpoint' => $endpoint,
+                'payload' => $payload,
+                'queuedAt' => gmdate('c'),
+            ];
+
+            if ($kind !== null && $kind !== '') {
+                $entry['kind'] = $kind;
+            }
+            if ($error !== null && $error !== '') {
+                $entry['error'] = $error;
+            }
+
+            $line = json_encode($entry, JSON_UNESCAPED_UNICODE).PHP_EOL;
             file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
         } catch (Throwable $e) {
             $this->log->log('WARN', 'Failed to append queue file', ['error'=>$e->getMessage()]);
         }
+    }
+
+    private function inferEndpointFromPayload(array $payload): string {
+        $kind = (string)($payload['kind'] ?? '');
+        return match ($kind) {
+            'transactions' => '/trans',
+            'status' => '/status',
+            'heartbeat' => '/heartbeat',
+            'sync_bins' => '/bins',
+            default => '/sync/changes',
+        };
     }
 
     private function flushQueue(Http $http, string $path): void {
@@ -42,16 +66,28 @@ class Sync {
             $remain = [];
             foreach ($lines as $line) {
                 // tolerate broken lines
-                $payload = json_decode($line, true);
-                if (!is_array($payload)) { $remain[] = $line; continue; }
+                $entry = json_decode($line, true);
+                if (!is_array($entry)) { $remain[] = $line; continue; }
+
+                $endpoint = '/sync/changes';
+                $payload = $entry;
+                if (isset($entry['endpoint']) && is_string($entry['endpoint']) && isset($entry['payload']) && is_array($entry['payload'])) {
+                    $endpoint = $entry['endpoint'];
+                    $payload = $entry['payload'];
+                } else {
+                    $endpoint = $this->inferEndpointFromPayload($entry);
+                }
 
                 try {
-                    $res = $http->postJson('/sync/changes', $payload);
+                    $res = $http->postJson($endpoint, $payload);
                     $status = (int)($res['status'] ?? 0);
                     if ($status < 200 || $status >= 300) {
                         throw new RuntimeException('Bad status '.$status);
                     }
-                    $this->log->log('INFO', 'Flushed queued item', ['table'=>$payload['table']??'unknown']);
+                    $this->log->log('INFO', 'Flushed queued item', [
+                        'endpoint' => $endpoint,
+                        'kind' => $payload['kind'] ?? 'unknown',
+                    ]);
                 } catch (Throwable $e) {
                     $remain[] = $line;
                     $this->log->log('WARN', 'Still offline for queued item', ['error'=>$e->getMessage()]);
@@ -75,9 +111,8 @@ class Sync {
                 throw new RuntimeException('Bad status '.$status);
             }
         } catch (Throwable $e) {
-            $this->queueOffline($queueFile, [
-                'machineId' => $machineId, 'timestamp' => gmdate('c'), 'kind' => 'heartbeat'
-            ]);
+            $payload = ['machineId' => $machineId, 'timestamp' => gmdate('c'), 'kind' => 'heartbeat'];
+            $this->queueOffline($queueFile, '/heartbeat', $payload, 'heartbeat', $e->getMessage());
             $this->log->log('WARN', 'Heartbeat queued', ['error'=>$e->getMessage()]);
         }
     }
@@ -112,7 +147,12 @@ class Sync {
         }
 
         $snap = $this->readJsonFile($snapshotFile);
-        $http = new Http($this->cfg['api']['baseUrl'] ?? '', $this->cfg['api']['token'] ?? null);
+        $http = new Http(
+            $this->cfg['api']['baseUrl'] ?? '',
+            $this->cfg['api']['token'] ?? null,
+            max(1, (int)($this->cfg['api']['timeoutSeconds'] ?? 30)),
+            max(1, (int)($this->cfg['api']['connectTimeoutSeconds'] ?? 10))
+        );
 
         if (($this->cfg['sync']['enabledTrans'] ?? false) && $pdo) {
             $this->runTransactions($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
@@ -158,6 +198,7 @@ class Sync {
 
     private function runTransactions(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): bool
     {
+        $payload = null;
         try {
             $lastSync = (int)($snap['user_transaction_lastSync'] ?? 0);
             $checkStmt = $pdo->prepare(
@@ -174,7 +215,7 @@ class Sync {
             $limitIds = max(0, (int)($this->cfg['sync']['transBatch'] ?? 5000));
 
             $idsSql =
-                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 AND print_barcode IS NOT NULL AND print_barcode <> ''GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
+                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
 
             $idsStmt = $pdo->prepare($idsSql);
             $idsStmt->execute([':lastSync' => $lastSync]);
@@ -216,18 +257,27 @@ class Sync {
                 if (!$transactionId) continue;
 
                 $dateline = (int)($r['dateline'] ?? 0);
-                $formattedTime = $dateline > 0 ? date('Y-m-d H:i:s', $dateline) : null;
+                $formattedTime = $dateline > 0 ? gmdate('Y-m-d H:i:s', $dateline) : null;
+
+                if (!isset($data[$transactionId])) {
+                    $data[$transactionId] = ['details' => [], 'last_transaction_time' => null, '_last_transaction_ts' => 0];
+                }
 
                 $r['datetime'] = $formattedTime;
                 $data[$transactionId]['details'][] = $r;
 
-                $prev = $data[$transactionId]['last_transaction_time'] ?? null;
-                if (!$prev || ($formattedTime && strtotime($formattedTime) > strtotime($prev))) {
+                if ($dateline > (int)$data[$transactionId]['_last_transaction_ts']) {
+                    $data[$transactionId]['_last_transaction_ts'] = $dateline;
                     $data[$transactionId]['last_transaction_time'] = $formattedTime;
                 }
 
                 if ($dateline > $maxSentDateline) $maxSentDateline = $dateline;
             }
+
+            foreach ($data as &$transaction) {
+                unset($transaction['_last_transaction_ts']);
+            }
+            unset($transaction);
 
             if (!$data) {
                 $this->log->log('INFO', 'No new records to send (post-filter)');
@@ -261,13 +311,12 @@ class Sync {
 
             throw new RuntimeException('Bad status ' . $status);
         } catch (Throwable $e) {
-            $this->queueOffline($queueFile, [
-                'machineId' => $machineId,
-                'timestamp' => gmdate('c'),
-                'kind' => 'transactions',
-                'error' => $e->getMessage(),
-            ]);
-            $this->log->log('WARN', 'Queued transactions (offline)', ['error' => $e->getMessage()]);
+            if (is_array($payload)) {
+                $this->queueOffline($queueFile, '/trans', $payload, 'transactions', $e->getMessage());
+                $this->log->log('WARN', 'Queued transactions (offline)', ['error' => $e->getMessage()]);
+            } else {
+                $this->log->log('ERROR', 'Transactions step failed before payload build', ['error' => $e->getMessage()]);
+            }
             return false;
         }
     }
@@ -378,16 +427,16 @@ class Sync {
     private function runStatus(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): void {
         $now = gmdate('c');
         try {
-            $stmt = $pdo->query('SELECT * FROM "command" ORDER BY id DESC LIMIT 1');
+            $stmt = $pdo->query("SELECT * FROM command ORDER BY id DESC LIMIT 1");
             $statusRow = $stmt?->fetch(PDO::FETCH_ASSOC) ?: [];
         } catch (Throwable $e) {
-            $this->queueOffline($queueFile, [
+            $payload = [
                 'machineId'  => $machineId,
                 'timestamp'  => $now,
                 'kind'       => 'status',
                 'data'       => ['command' => null],
-                'error'      => 'db_read_failed: '.$e->getMessage(),
-            ]);
+            ];
+            $this->queueOffline($queueFile, '/status', $payload, 'status', $e->getMessage());
             $this->log->log('WARN', 'Queued status (DB read failed)', ['error' => $e->getMessage()]);
 
             try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
@@ -422,13 +471,13 @@ class Sync {
             $msg = $res['message'] ?? ($res['body'] ?? null);
             throw new RuntimeException('Bad status '.$status.($msg ? ' - '.substr((string)$msg, 0, 200) : ''));
         } catch (Throwable $e) {
-            $this->queueOffline($queueFile, [
+            $queuedPayload = [
                 'machineId'  => $machineId,
                 'timestamp'  => $now,
                 'kind'       => 'status',
                 'data'       => ['command' => $statusRow],
-                'error'      => $e->getMessage(),
-            ]);
+            ];
+            $this->queueOffline($queueFile, '/status', $queuedPayload, 'status', $e->getMessage());
 
             $this->log->log('WARN', 'Queued status (offline)', [
                 'error'      => $e->getMessage(),
@@ -438,8 +487,14 @@ class Sync {
         try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
     }
 
-    private function runBins(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): void {
-//        try {
+    private function runBins(?PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): void {
+        if (!$pdo) {
+            $this->log->log('INFO', 'Sync disabled - Bins are disabled or DB not ready');
+            return;
+        }
+
+        $payload = null;
+        try {
             // fetch all rows from empty_records
             $stmt = $pdo->query("SELECT id, mid, dateline, bin_type, barcode FROM empty_record ORDER BY id ASC");
             $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
@@ -448,10 +503,10 @@ class Sync {
             $newHash = hash('sha256', json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
             $oldHash = $snap['empty_records_hash'] ?? null;
 
-//            if ($newHash === $oldHash) {
-//                $this->log->log('INFO', 'No bins change');
-//                return;
-//            }
+            if ($newHash === $oldHash) {
+                $this->log->log('INFO', 'No bins change');
+                return;
+            }
 
             $payload = [
                 'machineId' => $machineId,
@@ -473,14 +528,16 @@ class Sync {
             } else {
                 throw new RuntimeException('Bad status bin' . $status);
             }
-//        } catch (Throwable $e) {
-//            $this->queueOffline($queueFile, [
-//                'machineId'  => $machineId,
-//                'timestamp'  => gmdate('c'),
-//                'kind'       => 'sync_bins',
-//            ]);
-//            $this->log->log('WARN', 'Queued bins sync (offline)', ['error' => $e->getMessage()]);
-//        }
+        } catch (Throwable $e) {
+            $fallbackPayload = [
+                'machineId' => $machineId,
+                'integration' => $this->cfg['integration'] ?? null,
+                'timestamp' => gmdate('c'),
+                'kind' => 'sync_bins',
+            ];
+            $this->queueOffline($queueFile, '/bins', is_array($payload) ? $payload : $fallbackPayload, 'sync_bins', $e->getMessage());
+            $this->log->log('WARN', 'Queued bins sync (offline)', ['error' => $e->getMessage()]);
+        }
 
         // try to flush after attempts
         try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
@@ -623,7 +680,7 @@ class Sync {
                 return;
             }
 
-            $baseDir = 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic\\img';
+            $baseDir = (string)($this->cfg['paths']['advertsDir'] ?? 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic\\img');
             if (!is_dir($baseDir)) {
                 @mkdir($baseDir, 0777, true);
             }
@@ -661,13 +718,13 @@ class Sync {
 
                 $nameFromApi = $ad['name'] ?? null;
                 if ($nameFromApi) {
-                    $fileName = $slot . '_' . $nameFromApi;
+                    $fileName = $slot . '_' . $this->sanitizeFileName((string)$nameFromApi);
                 } else {
                     $basename = basename(parse_url($url, PHP_URL_PATH) ?: '');
                     if ($basename === '' || $basename === '/') {
                         $basename = $slot . '.bin';
                     }
-                    $fileName = $slot . '_' . $basename;
+                    $fileName = $slot . '_' . $this->sanitizeFileName($basename);
                 }
 
                 $targetPath   = rtrim($baseDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
@@ -802,5 +859,12 @@ class Sync {
         }
 
         return $data;
+    }
+
+    private function sanitizeFileName(string $name): string
+    {
+        $clean = preg_replace('/[^A-Za-z0-9._-]/', '_', $name) ?? '';
+        $clean = trim($clean, '._-');
+        return $clean !== '' ? $clean : 'file.bin';
     }
 }

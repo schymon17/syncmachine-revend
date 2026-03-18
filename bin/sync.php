@@ -77,11 +77,31 @@ switch ($cmd) {
         $lines = file($queuePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
         $remain = [];
         foreach ($lines as $line) {
-            $payload = json_decode($line, true);
+            $entry = json_decode($line, true);
+            if (!is_array($entry)) { $remain[] = $line; continue; }
+
+            $payload = $entry;
+            $endpoint = '/sync/changes';
+            if (isset($entry['endpoint']) && is_string($entry['endpoint']) && isset($entry['payload']) && is_array($entry['payload'])) {
+                $endpoint = $entry['endpoint'];
+                $payload = $entry['payload'];
+            } else {
+                $kind = (string)($entry['kind'] ?? '');
+                $endpoint = match ($kind) {
+                    'transactions' => '/trans',
+                    'status' => '/status',
+                    'heartbeat' => '/heartbeat',
+                    'sync_bins' => '/bins',
+                    default => '/sync/changes',
+                };
+            }
             try {
-                $res = $http->postJson('/sync/changes', $payload);
+                $res = $http->postJson($endpoint, $payload);
                 if ($res['status'] < 200 || $res['status'] >= 300) throw new RuntimeException('Bad status '.$res['status']);
-                $log->log('INFO', 'Flushed queued item (manual)', ['table'=>$payload['table'] ?? 'unknown']);
+                $log->log('INFO', 'Flushed queued item (manual)', [
+                    'endpoint' => $endpoint,
+                    'kind' => $payload['kind'] ?? 'unknown',
+                ]);
             } catch (Throwable $e) {
                 $remain[] = $line;
                 $log->log('WARN', 'Still offline (manual flush)', ['error'=>$e->getMessage()]);
