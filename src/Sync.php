@@ -151,7 +151,9 @@ class Sync {
             $this->cfg['api']['baseUrl'] ?? '',
             $this->cfg['api']['token'] ?? null,
             max(1, (int)($this->cfg['api']['timeoutSeconds'] ?? 30)),
-            max(1, (int)($this->cfg['api']['connectTimeoutSeconds'] ?? 10))
+            max(1, (int)($this->cfg['api']['connectTimeoutSeconds'] ?? 10)),
+            max(262144, (int)($this->cfg['api']['maxPayloadBytes'] ?? 5242880)),
+            max(262144, (int)($this->cfg['api']['maxResponseBytes'] ?? 8388608))
         );
 
         if (($this->cfg['sync']['enabledTrans'] ?? false) && $pdo) {
@@ -212,7 +214,10 @@ class Sync {
                 return false;
             }
 
-            $limitIds = max(0, (int)($this->cfg['sync']['transBatch'] ?? 5000));
+            $limitIds = max(1, (int)($this->cfg['sync']['transBatch'] ?? 500));
+            $maxTransactionsPerPayload = max(1, (int)($this->cfg['sync']['transMaxTransactionsPerPayload'] ?? 120));
+            $maxRowsPerPayload = max(1, (int)($this->cfg['sync']['transMaxRowsPerPayload'] ?? 3000));
+            $maxRowsPerTransaction = max(1, (int)($this->cfg['sync']['transMaxRowsPerTransaction'] ?? 1500));
 
             $idsSql =
                 "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
@@ -227,14 +232,10 @@ class Sync {
             }
 
             $transactionIds = [];
-            $maxSentDateline = 0;
             foreach ($idRows as $row) {
                 $tid = (string)($row['transactionId'] ?? '');
                 if ($tid === '') continue;
                 $transactionIds[] = $tid;
-
-                $dl = (int)($row['max_dateline'] ?? 0);
-                if ($dl > $maxSentDateline) $maxSentDateline = $dl;
             }
 
             if (!$transactionIds) {
@@ -243,28 +244,35 @@ class Sync {
             }
 
             $placeholders = implode(',', array_fill(0, count($transactionIds), '?'));
-            $rowsStmt = $pdo->prepare("SELECT * FROM user_transaction WHERE print_barcode IN ($placeholders) ORDER BY dateline ASC");
+            $rowsStmt = $pdo->prepare("SELECT * FROM user_transaction WHERE print_barcode IN ($placeholders) ORDER BY print_barcode ASC, dateline ASC");
             $rowsStmt->execute($transactionIds);
-            $rows = $rowsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-            if (!$rows) {
-                $this->log->log('INFO', 'No rows found for finished transaction IDs');
-                return false;
-            }
             $data = [];
-            foreach ($rows as $r) {
+            $rowsCount = 0;
+            $maxSentDateline = $lastSync;
+
+            while ($r = $rowsStmt->fetch(PDO::FETCH_ASSOC)) {
                 $transactionId = $r['print_barcode'] ?? null;
                 if (!$transactionId) continue;
+
+                if (!isset($data[$transactionId])) {
+                    if (count($data) >= $maxTransactionsPerPayload || $rowsCount >= $maxRowsPerPayload) {
+                        break;
+                    }
+                    $data[$transactionId] = ['details' => [], 'last_transaction_time' => null, '_last_transaction_ts' => 0];
+                }
 
                 $dateline = (int)($r['dateline'] ?? 0);
                 $formattedTime = $dateline > 0 ? gmdate('Y-m-d H:i:s', $dateline) : null;
 
-                if (!isset($data[$transactionId])) {
-                    $data[$transactionId] = ['details' => [], 'last_transaction_time' => null, '_last_transaction_ts' => 0];
+                if (count($data[$transactionId]['details']) >= $maxRowsPerTransaction) {
+                    throw new RuntimeException(
+                        'Transaction '.$transactionId.' exceeds rows limit '.$maxRowsPerTransaction.' (memory guard)'
+                    );
                 }
 
                 $r['datetime'] = $formattedTime;
                 $data[$transactionId]['details'][] = $r;
+                $rowsCount++;
 
                 if ($dateline > (int)$data[$transactionId]['_last_transaction_ts']) {
                     $data[$transactionId]['_last_transaction_ts'] = $dateline;
@@ -273,6 +281,7 @@ class Sync {
 
                 if ($dateline > $maxSentDateline) $maxSentDateline = $dateline;
             }
+            $rowsStmt->closeCursor();
 
             foreach ($data as &$transaction) {
                 unset($transaction['_last_transaction_ts']);
@@ -301,7 +310,7 @@ class Sync {
 
                 $this->log->log('INFO', 'Sent transactions', [
                     'transactions' => count($data),
-                    'rows' => count($rows),
+                    'rows' => $rowsCount,
                     'from' => $lastSync,
                     'to' => $maxSentDateline,
                 ]);
@@ -495,38 +504,71 @@ class Sync {
 
         $payload = null;
         try {
-            // fetch all rows from empty_records
-            $stmt = $pdo->query("SELECT id, mid, dateline, bin_type, barcode FROM empty_record ORDER BY id ASC");
-            $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+            $lastId = (int)($snap['empty_records_last_id'] ?? 0);
+            $batchSize = max(1, (int)($this->cfg['sync']['binsBatch'] ?? 1000));
+            $maxBatchesPerRun = max(1, (int)($this->cfg['sync']['binsMaxBatchesPerRun'] ?? 2));
+            $totalSent = 0;
 
-            // hash of the whole dataset to detect changes
-            $newHash = hash('sha256', json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-            $oldHash = $snap['empty_records_hash'] ?? null;
+            for ($batch = 1; $batch <= $maxBatchesPerRun; $batch++) {
+                $stmt = $pdo->prepare(
+                    "SELECT id, mid, dateline, bin_type, barcode FROM empty_record WHERE id > :lastId ORDER BY id ASC LIMIT :batchSize"
+                );
+                $stmt->bindValue(':lastId', $lastId, PDO::PARAM_INT);
+                $stmt->bindValue(':batchSize', $batchSize, PDO::PARAM_INT);
+                $stmt->execute();
 
-            if ($newHash === $oldHash) {
-                $this->log->log('INFO', 'No bins change');
-                return;
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+                if (!$rows) {
+                    if ($totalSent === 0) {
+                        $this->log->log('INFO', 'No new bins rows to sync', ['last_id' => $lastId]);
+                    }
+                    break;
+                }
+
+                $payload = [
+                    'machineId' => $machineId,
+                    'integration' => $this->cfg['integration'] ?? null,
+                    'timestamp' => gmdate('c'),
+                    'kind' => 'sync_bins',
+                    'data' => [
+                        'empty_records' => $rows,
+                    ],
+                ];
+
+                $res = $http->postJson('/bins', $payload);
+                $status = (int)($res['status'] ?? 0);
+                if ($status < 200 || $status >= 300) {
+                    throw new RuntimeException('Bad status bin '.$status);
+                }
+
+                $batchMaxId = $lastId;
+                foreach ($rows as $row) {
+                    $rid = (int)($row['id'] ?? 0);
+                    if ($rid > $batchMaxId) $batchMaxId = $rid;
+                }
+
+                $lastId = $batchMaxId;
+                $snap['empty_records_last_id'] = $lastId;
+                $this->safeSnapshotWrite($snapshotFile, $snap);
+
+                $sentNow = count($rows);
+                $totalSent += $sentNow;
+                $this->log->log('INFO', 'Pushed bins sync batch', [
+                    'batch' => $batch,
+                    'count' => $sentNow,
+                    'last_id' => $lastId,
+                ]);
+
+                if ($sentNow < $batchSize) {
+                    break;
+                }
             }
 
-            $payload = [
-                'machineId' => $machineId,
-                'integration' => $this->cfg['integration'] ?? null,
-                'timestamp' => gmdate('c'),
-                'kind' => 'sync_bins',
-                'data' => [
-                    'empty_records' => $rows,
-                ],
-            ];
-
-            $res = $http->postJson('/bins', $payload);
-
-            $status = (int)($res['status'] ?? 0);
-            if ($status >= 200 && $status < 300) {
-                $this->log->log('INFO', 'Pushed bins sync', ['count' => count($rows)]);
-                $snap['empty_records_hash'] = $newHash;
-                $this->safeSnapshotWrite($snapshotFile, $snap);
-            } else {
-                throw new RuntimeException('Bad status bin' . $status);
+            if ($totalSent > 0) {
+                $this->log->log('INFO', 'Pushed bins sync total', [
+                    'count' => $totalSent,
+                    'last_id' => $lastId,
+                ]);
             }
         } catch (Throwable $e) {
             $fallbackPayload = [
@@ -534,6 +576,7 @@ class Sync {
                 'integration' => $this->cfg['integration'] ?? null,
                 'timestamp' => gmdate('c'),
                 'kind' => 'sync_bins',
+                'data' => ['empty_records' => []],
             ];
             $this->queueOffline($queueFile, '/bins', is_array($payload) ? $payload : $fallbackPayload, 'sync_bins', $e->getMessage());
             $this->log->log('WARN', 'Queued bins sync (offline)', ['error' => $e->getMessage()]);
