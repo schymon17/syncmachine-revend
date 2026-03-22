@@ -7,6 +7,8 @@ require __DIR__ . '/../src/DbDiff.php';
 require __DIR__ . '/../src/Http.php';
 require __DIR__ . '/../src/Sync.php';
 require __DIR__ . '/../src/Bootstrap.php';
+require __DIR__ . '/../src/Version.php';
+require __DIR__ . '/../src/Updater.php';
 
 $ROOT = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
 $CFG = $ROOT . '/data/app.config.json';
@@ -42,9 +44,12 @@ set_exception_handler(function (Throwable $e) use ($emergencyLog) {
 function usage(): void {
     echo "Usage:\n";
     echo "  php bin/sync.php bootstrap        Fetch remote config and save\n";
+    echo "  php bin/sync.php version          Print current app version\n";
     echo "  php bin/sync.php run-once         Run one sync cycle (auto-bootstrap if needed)\n";
     echo "  php bin/sync.php daemon           Run continuous sync loop (auto-bootstrap if needed)\n";
     echo "  php bin/sync.php flush-queue      Try to flush queued payloads\n";
+    echo "  php bin/sync.php check-update     Check update endpoint (use --download to fetch package)\n";
+    echo "  php bin/sync.php apply-update     Apply previously downloaded package\n";
     echo "  php bin/sync.php test-db          Test DB connection\n";
     echo "\n";
     exit(1);
@@ -109,6 +114,38 @@ function ensure_bootstrap(Config $config, Config $configBasic, Logger $log): voi
     }
 }
 
+function updater_from_config(array $cfgArr, Logger $log, string $root): Updater {
+    $version = new Version($root);
+    return new Updater($cfgArr, $log, $root, $version);
+}
+
+function maybe_prepare_update(array $cfgArr, Logger $log, string $root, bool $force = false): ?array {
+    try {
+        $updater = updater_from_config($cfgArr, $log, $root);
+        $check = $updater->maybeCheckForUpdate($force);
+
+        if (($check['skipped'] ?? false) === true) {
+            return null;
+        }
+        if (($check['updateAvailable'] ?? false) !== true) {
+            return null;
+        }
+
+        $autoDownload = (bool)($cfgArr['update']['autoDownload'] ?? true);
+        if (!$autoDownload) {
+            $log->log('INFO', 'Update available but autoDownload disabled', [
+                'version' => $check['update']['version'] ?? '',
+            ]);
+            return null;
+        }
+
+        return $updater->prepareUpdate($check);
+    } catch (Throwable $e) {
+        $log->log('WARN', 'Update check/prepare failed (non-fatal)', ['error' => $e->getMessage()]);
+        return null;
+    }
+}
+
 try {
     switch ($cmd) {
         case 'bootstrap':
@@ -116,11 +153,20 @@ try {
             $boot->run();
             break;
 
+        case 'version':
+            $version = new Version($ROOT);
+            echo $version->current() . PHP_EOL;
+            break;
+
         case 'run-once':
             ensure_bootstrap($config, $configBasic, $log);
             $cfgArr = $config->load();
             $sync = new Sync($cfgArr, $log);
             $sync->runOnce();
+            $shouldCheckUpdates = (bool)($cfgArr['update']['enabled'] ?? false) && (bool)($cfgArr['update']['checkOnRunOnce'] ?? false);
+            if ($shouldCheckUpdates) {
+                maybe_prepare_update($cfgArr, $log, $ROOT, false);
+            }
             echo "OK\n";
             break;
 
@@ -133,6 +179,14 @@ try {
             while (true) {
                 try {
                     $sync->runOnce();
+                    $prepared = maybe_prepare_update($cfgArr, $log, $ROOT, false);
+                    if ($prepared !== null && (bool)($cfgArr['update']['restartAfterPrepare'] ?? true)) {
+                        $log->log('INFO', 'Update prepared, exiting daemon for apply-update', [
+                            'version' => $prepared['version'] ?? '',
+                            'exitCode' => 20,
+                        ]);
+                        exit(20);
+                    }
                 } catch (Throwable $e) {
                     $log->log('ERROR', 'Daemon iteration failed (continuing)', [
                         'error' => $e->getMessage(),
@@ -184,6 +238,33 @@ try {
             }
             file_put_contents($queuePath, implode(PHP_EOL, $remain).(count($remain) ? PHP_EOL : ''), LOCK_EX);
             echo "Flush complete.\n";
+            break;
+
+        case 'check-update':
+            $cfgArr = $config->load();
+            $updater = updater_from_config($cfgArr, $log, $ROOT);
+            $check = $updater->maybeCheckForUpdate(true);
+            if (($check['updateAvailable'] ?? false) !== true) {
+                echo "No update available.\n";
+                break;
+            }
+
+            $targetVersion = (string)($check['update']['version'] ?? '');
+            echo "Update available: " . $targetVersion . PHP_EOL;
+            $downloadRequested = in_array('--download', $argv, true);
+            if ($downloadRequested || (bool)($cfgArr['update']['autoDownload'] ?? false)) {
+                $pending = $updater->prepareUpdate($check);
+                if ($pending !== null) {
+                    echo "Prepared package: " . ($pending['packagePath'] ?? '') . PHP_EOL;
+                }
+            }
+            break;
+
+        case 'apply-update':
+            $cfgArr = $config->load();
+            $updater = updater_from_config($cfgArr, $log, $ROOT);
+            $result = $updater->applyPendingUpdate();
+            echo "Updated to version " . ($result['installedVersion'] ?? '') . PHP_EOL;
             break;
 
         case 'test-db':

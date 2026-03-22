@@ -40,11 +40,57 @@ Commands
 - Daemon loop:       php bin\sync.php daemon
 - Flush queue now:   php bin\sync.php flush-queue
 - Test DB:           php bin\sync.php test-db
+- Print version:     php bin\sync.php version
+- Check update:      php bin\sync.php check-update
+- Check + download:  php bin\sync.php check-update --download
+- Apply pending:     php bin\sync.php apply-update
+
+Versioning
+----------
+- App version is stored in: VERSION (SemVer recommended, e.g. 1.4.2)
+- Every release package should update VERSION.
+
+Auto-update (check/download/apply)
+----------------------------------
+Config block in data\app.config.json:
+  "update": {
+    "enabled": false,
+    "channel": "stable",
+    "checkPath": "/update/check",
+    "checkIntervalSeconds": 3600,
+    "autoDownload": true,
+    "restartAfterPrepare": true,
+    "checkOnRunOnce": false,
+    "maxPackageBytes": 104857600,
+    "stateFile": "data/update.state.json",
+    "pendingFile": "data/update.pending.json"
+  }
+
+Flow:
+1) Daemon checks endpoint for a newer version.
+2) When available, it downloads package and writes pending metadata.
+3) Daemon exits with code 20.
+4) daemon.bat runs apply-update and restarts process.
+
+Expected update package format (ZIP):
+- update.manifest.json
+- files/... (new files to deploy)
+
+Manifest example:
+  {
+    "version": "1.4.2",
+    "minSupportedVersion": "1.3.0",
+    "files": [
+      {"from":"files/bin/sync.php","to":"bin/sync.php","sha256":"..."},
+      {"from":"files/src/Sync.php","to":"src/Sync.php","sha256":"..."},
+      {"from":"files/VERSION","to":"VERSION","sha256":"..."}
+    ]
+  }
 
 Windows helpers
 ---------------
 - run-once.bat   (runs one cycle and pauses)
-- daemon.bat     (runs continuous loop)
+- daemon.bat     (runs continuous loop + applies pending updates)
 
 Files
 -----

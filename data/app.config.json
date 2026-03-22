@@ -27,6 +27,18 @@
         "enabledCoupons": true,
         "outboxForceRecreateTriggers": true
     },
+    "update": {
+        "enabled": false,
+        "channel": "stable",
+        "checkPath": "/update/check",
+        "checkIntervalSeconds": 3600,
+        "autoDownload": true,
+        "restartAfterPrepare": true,
+        "checkOnRunOnce": false,
+        "maxPackageBytes": 104857600,
+        "stateFile": "data/update.state.json",
+        "pendingFile": "data/update.pending.json"
+    },
     "address": "",
     "notification_emails": [],
     "notification_emails_bcc": [],
