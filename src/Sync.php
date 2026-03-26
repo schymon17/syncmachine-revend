@@ -124,6 +124,17 @@ class Sync {
             $this->log->log('WARN', 'Snapshot write failed (non-fatal)', ['error'=>$e->getMessage()]);
         }
     }
+
+    private function isMissingTableError(Throwable $e): bool {
+        if ((string)$e->getCode() === '42S02') {
+            return true;
+        }
+
+        $msg = strtolower($e->getMessage());
+        return str_contains($msg, 'sqlstate[42s02]')
+            || (str_contains($msg, '1146') && str_contains($msg, "doesn't exist"));
+    }
+
     public function runOnce(): void {
         $machineId = $this->cfg['machineId'] ?? '';
         if ($machineId === '') {
@@ -571,6 +582,14 @@ class Sync {
                 ]);
             }
         } catch (Throwable $e) {
+            if ($this->isMissingTableError($e)) {
+                $this->log->log('WARN', 'Skipping bins sync - source table missing', [
+                    'table' => 'empty_record',
+                    'error' => $e->getMessage(),
+                ]);
+                return;
+            }
+
             $fallbackPayload = [
                 'machineId' => $machineId,
                 'integration' => $this->cfg['integration'] ?? null,

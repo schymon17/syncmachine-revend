@@ -46,6 +46,9 @@ Windows helpers
 - run-once.bat   (runs one cycle and pauses)
 - daemon.bat     (watchdog loop, restarts daemon on every exit)
 - daemon-autostart.bat (starts daemon.bat minimized; preferred for Windows Startup)
+- Startup shortcut (Windows):
+  - Target: "C:\sync\daemon-autostart.bat"
+  - Start in: "C:\sync"
 
 Files
 -----
