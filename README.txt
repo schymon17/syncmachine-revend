@@ -44,7 +44,8 @@ Commands
 Windows helpers
 ---------------
 - run-once.bat   (runs one cycle and pauses)
-- daemon.bat     (runs continuous loop)
+- daemon.bat     (watchdog loop, restarts daemon on every exit)
+- daemon-autostart.bat (starts daemon.bat minimized; preferred for Windows Startup)
 
 Files
 -----
