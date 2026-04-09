@@ -214,14 +214,16 @@ class Sync {
         $payload = null;
         try {
             $lastSync = (int)($snap['user_transaction_lastSync'] ?? 0);
+            $overlapBuffer = max(0, (int)($this->cfg['sync']['transOverlapBufferSeconds'] ?? 300));
+            $queryLastSync = max(0, $lastSync - $overlapBuffer);
             $checkStmt = $pdo->prepare(
-                "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 LIMIT 1"
+                "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4) LIMIT 1"
             );
-            $checkStmt->execute([':lastSync' => $lastSync]);
+            $checkStmt->execute([':lastSync' => $queryLastSync]);
             $hasFinished = (bool)$checkStmt->fetchColumn();
 
             if (!$hasFinished) {
-                $this->log->log('INFO', 'No finished transactions (transactiondone=2) detected');
+                $this->log->log('INFO', 'No finished transactions (transactiondone IN 2,4) detected');
                 return false;
             }
 
@@ -231,10 +233,10 @@ class Sync {
             $maxRowsPerTransaction = max(1, (int)($this->cfg['sync']['transMaxRowsPerTransaction'] ?? 1500));
 
             $idsSql =
-                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone = 2 AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
+                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4) AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
 
             $idsStmt = $pdo->prepare($idsSql);
-            $idsStmt->execute([':lastSync' => $lastSync]);
+            $idsStmt->execute([':lastSync' => $queryLastSync]);
             $idRows = $idsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
             if (!$idRows) {
