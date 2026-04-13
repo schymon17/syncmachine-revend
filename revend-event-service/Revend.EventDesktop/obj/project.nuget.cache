@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "XOlfFWPkK4k=",
+  "success": true,
+  "projectFilePath": "/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventDesktop/Revend.EventDesktop.csproj",
+  "expectedPackageFiles": [
+    "/Users/szymonszymczyna/.nuget/packages/microsoft.web.webview2/1.0.3065.39/microsoft.web.webview2.1.0.3065.39.nupkg.sha512",
+    "/Users/szymonszymczyna/.nuget/packages/microsoft.windowsdesktop.app.ref/10.0.5/microsoft.windowsdesktop.app.ref.10.0.5.nupkg.sha512"
+  ],
+  "logs": []
+}
