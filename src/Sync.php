@@ -207,6 +207,149 @@ class Sync {
         }
     }
 
+    public function resendCoupon(): void
+    {
+        $ask = static function (string $prompt): string {
+            echo $prompt;
+            $line = fgets(STDIN);
+            return $line === false ? '' : trim($line);
+        };
+
+        $machineId = $this->cfg['machineId'] ?? '';
+        if ($machineId === '') {
+            echo "BLAD: machineId pusty w konfiguracji. Przerwano.\n";
+            $this->log->log('ERROR', 'resend-coupon: machineId empty');
+            return;
+        }
+
+        try {
+            $pdo = Db::pdo($this->cfg['db']);
+        } catch (Throwable $e) {
+            echo "BLAD polaczenia z baza maszyny: " . $e->getMessage() . "\n";
+            $this->log->log('ERROR', 'resend-coupon: DB connect failed', ['error' => $e->getMessage()]);
+            return;
+        }
+
+        $coupon = $ask("Podaj numer kuponu (print_barcode): ");
+        if ($coupon === '') {
+            echo "Anulowano (pusty numer kuponu). Nic nie wyslano.\n";
+            return;
+        }
+
+        try {
+            $stmt = $pdo->prepare(
+                "SELECT * FROM user_transaction WHERE print_barcode = :pb ORDER BY dateline ASC"
+            );
+            $stmt->execute([':pb' => $coupon]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable $e) {
+            echo "BLAD odczytu z bazy: " . $e->getMessage() . "\n";
+            $this->log->log('ERROR', 'resend-coupon: DB read failed', ['coupon' => $coupon, 'error' => $e->getMessage()]);
+            return;
+        }
+
+        if (!$rows) {
+            echo "Nie znaleziono transakcji o numerze kuponu '{$coupon}' w bazie maszyny. Nic nie wyslano.\n";
+            $this->log->log('INFO', 'resend-coupon: coupon not found', ['coupon' => $coupon]);
+            return;
+        }
+
+        $finished = false;
+        foreach ($rows as $r) {
+            if (in_array((int)($r['transactiondone'] ?? 0), [2, 4], true)) {
+                $finished = true;
+                break;
+            }
+        }
+        if (!$finished) {
+            echo "Transakcja '{$coupon}' istnieje, ale NIE jest zakonczona (brak wiersza transactiondone IN 2,4). Nic nie wyslano.\n";
+            $this->log->log('WARN', 'resend-coupon: transaction not finished', ['coupon' => $coupon, 'rows' => count($rows)]);
+            return;
+        }
+
+        $maxDateline = 0;
+        $states = [];
+        foreach ($rows as $r) {
+            $dl = (int)($r['dateline'] ?? 0);
+            if ($dl > $maxDateline) $maxDateline = $dl;
+            $states[(string)($r['transactiondone'] ?? '')] = true;
+        }
+        $lastTime = $maxDateline > 0 ? gmdate('Y-m-d H:i:s', $maxDateline) : null;
+        $integration = $this->cfg['integration'] ?? null;
+        $baseUrl = rtrim((string)($this->cfg['api']['baseUrl'] ?? ''), '/');
+
+        echo "\n--- Podsumowanie transakcji ---\n";
+        echo "Numer kuponu (print_barcode): {$coupon}\n";
+        echo "Liczba wierszy (butelek): " . count($rows) . "\n";
+        echo "Data (ostatni dateline): " . ($lastTime !== null ? $lastTime . " UTC" : "brak") . "\n";
+        echo "Stany transactiondone: " . implode(',', array_keys($states)) . "\n";
+        echo "Maszyna (machineId): {$machineId}\n";
+        echo "Integracja: " . ($integration !== null && $integration !== '' ? $integration : '(brak)') . "\n";
+        echo "Cel wysylki: {$baseUrl}/trans\n";
+        echo "-------------------------------\n";
+
+        $answer = strtolower($ask("Wyslac te transakcje do panelu Revend? [t/N]: "));
+        if (!in_array($answer, ['t', 'tak', 'y', 'yes'], true)) {
+            echo "Anulowano. Nic nie wyslano.\n";
+            $this->log->log('INFO', 'resend-coupon: cancelled by user', ['coupon' => $coupon]);
+            return;
+        }
+
+        $details = [];
+        foreach ($rows as $r) {
+            $dl = (int)($r['dateline'] ?? 0);
+            $r['datetime'] = $dl > 0 ? gmdate('Y-m-d H:i:s', $dl) : null;
+            $details[] = $r;
+        }
+
+        $payload = [
+            'machineId'   => $machineId,
+            'timestamp'   => gmdate('c'),
+            'kind'        => 'transactions',
+            'data'        => [
+                'transactions' => [
+                    $coupon => [
+                        'details'               => $details,
+                        'last_transaction_time' => $lastTime,
+                    ],
+                ],
+                'mid' => $machineId,
+            ],
+            'integration' => $integration,
+        ];
+
+        $http = new Http(
+            $this->cfg['api']['baseUrl'] ?? '',
+            $this->cfg['api']['token'] ?? null,
+            max(1, (int)($this->cfg['api']['timeoutSeconds'] ?? 30)),
+            max(1, (int)($this->cfg['api']['connectTimeoutSeconds'] ?? 10)),
+            max(262144, (int)($this->cfg['api']['maxPayloadBytes'] ?? 5242880)),
+            max(262144, (int)($this->cfg['api']['maxResponseBytes'] ?? 8388608))
+        );
+
+        try {
+            $res = $http->postJson('/trans', $payload);
+            $status = (int)($res['status'] ?? 0);
+            if ($status >= 200 && $status < 300) {
+                echo "OK - transakcja '{$coupon}' wyslana do panelu Revend (HTTP {$status}).\n";
+                $this->log->log('INFO', 'resend-coupon: sent', [
+                    'coupon' => $coupon,
+                    'rows'   => count($rows),
+                    'http'   => $status,
+                ]);
+                return;
+            }
+            throw new RuntimeException('Bad status ' . $status);
+        } catch (Throwable $e) {
+            echo "BLAD wysylki: " . $e->getMessage() . "\nTransakcja NIE zostala wyslana. Mozesz uruchomic skrypt ponownie.\n";
+            $this->log->log('ERROR', 'resend-coupon: send failed', [
+                'coupon' => $coupon,
+                'error'  => $e->getMessage(),
+            ]);
+            return;
+        }
+    }
+
     /* -------------------- Steps (isolated & non-blocking) -------------------- */
 
     private function runTransactions(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): bool

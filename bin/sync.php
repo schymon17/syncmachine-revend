@@ -46,6 +46,7 @@ function usage(): void {
     echo "  php bin/sync.php daemon           Run continuous sync loop (auto-bootstrap if needed)\n";
     echo "  php bin/sync.php flush-queue      Try to flush queued payloads\n";
     echo "  php bin/sync.php test-db          Test DB connection\n";
+    echo "  php bin/sync.php resend-coupon    Resend one finished transaction by coupon number\n";
     echo "\n";
     exit(1);
 }
@@ -196,6 +197,13 @@ try {
                 $log->log('ERROR', 'DB test failed', ['error' => $e->getMessage()]);
                 echo "DB ERROR: " . $e->getMessage() . "\n";
             }
+            break;
+
+        case 'resend-coupon':
+            ensure_bootstrap($config, $configBasic, $log);
+            $cfgArr = $config->load();
+            $sync = new Sync($cfgArr, $log);
+            $sync->resendCoupon();
             break;
 
         default:
