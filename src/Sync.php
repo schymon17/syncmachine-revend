@@ -256,13 +256,13 @@ class Sync {
 
         $finished = false;
         foreach ($rows as $r) {
-            if (in_array((int)($r['transactiondone'] ?? 0), [2, 4], true)) {
+            if (in_array((int)($r['transactiondone'] ?? 0), [2, 4, 5], true)) {
                 $finished = true;
                 break;
             }
         }
         if (!$finished) {
-            echo "Transakcja '{$coupon}' istnieje, ale NIE jest zakonczona (brak wiersza transactiondone IN 2,4). Nic nie wyslano.\n";
+            echo "Transakcja '{$coupon}' istnieje, ale NIE jest zakonczona (brak wiersza transactiondone IN 2,4,5). Nic nie wyslano.\n";
             $this->log->log('WARN', 'resend-coupon: transaction not finished', ['coupon' => $coupon, 'rows' => count($rows)]);
             return;
         }
