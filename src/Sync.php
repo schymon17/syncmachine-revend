@@ -360,13 +360,13 @@ class Sync {
             $overlapBuffer = max(0, (int)($this->cfg['sync']['transOverlapBufferSeconds'] ?? 300));
             $queryLastSync = max(0, $lastSync - $overlapBuffer);
             $checkStmt = $pdo->prepare(
-                "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4) LIMIT 1"
+                "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) LIMIT 1"
             );
             $checkStmt->execute([':lastSync' => $queryLastSync]);
             $hasFinished = (bool)$checkStmt->fetchColumn();
 
             if (!$hasFinished) {
-                $this->log->log('INFO', 'No finished transactions (transactiondone IN 2,4) detected');
+                $this->log->log('INFO', 'No finished transactions (transactiondone IN 2,4,5) detected');
                 return false;
             }
 
@@ -376,7 +376,7 @@ class Sync {
             $maxRowsPerTransaction = max(1, (int)($this->cfg['sync']['transMaxRowsPerTransaction'] ?? 1500));
 
             $idsSql =
-                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4) AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
+                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
 
             $idsStmt = $pdo->prepare($idsSql);
             $idsStmt->execute([':lastSync' => $queryLastSync]);
@@ -879,17 +879,29 @@ class Sync {
                 return;
             }
 
-            $newHash = hash('sha256', json_encode($adverts));
-            $oldHash = $snap['adverts_hash'] ?? null;
+            $apiMd5 = null;
+            if (isset($body['md5']) && is_string($body['md5'])) {
+                $md5 = strtolower(trim($body['md5']));
+                if ($md5 !== '') {
+                    $apiMd5 = $md5;
+                }
+            }
 
+            $newHash = $apiMd5 !== null
+                ? ('md5:' . $apiMd5)
+                : hash('sha256', json_encode($adverts));
+            $oldHash = $snap['adverts_hash'] ?? null;
             if ($newHash === $oldHash) {
                 $this->log->log('INFO', 'Adverts unchanged - skipping download and DB update');
                 return;
             }
 
-            $baseDir = (string)($this->cfg['paths']['advertsDir'] ?? 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic\\img');
-            if (!is_dir($baseDir)) {
-                @mkdir($baseDir, 0777, true);
+            $imageDir = (string)($this->cfg['paths']['advertsDir'] ?? 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic\\img');
+            $videoDir = (string)($this->cfg['paths']['advertsVideoDir'] ?? 'C:\\phpStudy\\PHPTutorial\\WWW\\advideo\\video');
+            foreach ([$imageDir, $videoDir] as $dir) {
+                if (!is_dir($dir)) {
+                    @mkdir($dir, 0777, true);
+                }
             }
 
             $savedPaths = [
@@ -905,9 +917,8 @@ class Sync {
                     continue;
                 }
 
-                $slot = $ad['slot'] ?? $slotKey;
-
-                if (!in_array($slot, ['p1', 'p2', 'p3', 'p4', 'p5'], true)) {
+                $slot = $this->normalizeAdvertSlot($ad['slot'] ?? $slotKey);
+                if ($slot === null) {
                     continue;
                 }
 
@@ -917,13 +928,15 @@ class Sync {
                     continue;
                 }
 
-                $url = $ad['url'] ?? null;
-                if (!$url) {
+                $url = isset($ad['url']) && is_string($ad['url']) ? $ad['url'] : null;
+                if ($url === null || $url === '') {
                     $this->log->log('WARN', sprintf('Advert %s has no URL, skipping', $slot));
                     continue;
                 }
 
                 $nameFromApi = $ad['name'] ?? null;
+                $nameFromApi = is_string($nameFromApi) ? $nameFromApi : null;
+                $mediaKind = $this->detectAdvertMediaKind($ad, $url, $nameFromApi);
                 if ($nameFromApi) {
                     $fileName = $slot . '_' . $this->sanitizeFileName((string)$nameFromApi);
                 } else {
@@ -934,14 +947,19 @@ class Sync {
                     $fileName = $slot . '_' . $this->sanitizeFileName($basename);
                 }
 
-                $targetPath   = rtrim($baseDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
-                $relativePath = 'img/' . $fileName;
+                if ($mediaKind === 'video' && !preg_match('/\.[A-Za-z0-9]{2,5}$/', $fileName)) {
+                    $fileName .= '.mp4';
+                }
+
+                $targetDir = $mediaKind === 'video' ? $videoDir : $imageDir;
+                $targetPath = rtrim($targetDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
+                $relativePath = ($mediaKind === 'video' ? 'video/' : 'img/') . $fileName;
 
                 try {
                     $data = $this->downloadBinary($url);
 
                     $this->atomicWrite($targetPath, $data);
-                    $this->log->log('INFO', sprintf('Downloaded advert %s to %s', $slot, $targetPath));
+                    $this->log->log('INFO', sprintf('Downloaded advert %s (%s) to %s', $slot, $mediaKind, $targetPath));
                     $savedPaths[$slot] = $relativePath;
                 } catch (Throwable $e) {
                     $this->log->log('WARN', sprintf('Failed to download advert %s', $slot), [
@@ -1066,6 +1084,107 @@ class Sync {
         }
 
         return $data;
+    }
+
+    private function normalizeAdvertSlot(mixed $slotRaw): ?string
+    {
+        $slot = strtolower(trim((string)$slotRaw));
+        if ($slot === '') {
+            return null;
+        }
+
+        if (in_array($slot, ['p1', 'p2', 'p3', 'p4', 'p5'], true)) {
+            return $slot;
+        }
+
+        if (preg_match('/^v([1-9][0-9]*)$/', $slot, $m)) {
+            $videoSlot = (int)$m[1];
+            if ($videoSlot === 1) {
+                // API zwraca v1 jako 5. slot reklamowy (p_down4)
+                return 'p5';
+            }
+            return null;
+        }
+
+        if (preg_match('/^p_down([0-4])$/', $slot, $m)) {
+            return 'p' . ((int)$m[1] + 1);
+        }
+
+        if (ctype_digit($slot)) {
+            $idx = (int)$slot;
+            if ($idx >= 1 && $idx <= 5) {
+                return 'p' . $idx;
+            }
+            if ($idx >= 0 && $idx <= 4) {
+                return 'p' . ($idx + 1);
+            }
+        }
+
+        return null;
+    }
+
+    private function detectAdvertMediaKind(array $ad, ?string $url, ?string $name): string
+    {
+        foreach (['type', 'mediaType', 'fileType', 'kind'] as $key) {
+            if (!isset($ad[$key]) || !is_string($ad[$key])) {
+                continue;
+            }
+            $value = strtolower(trim($ad[$key]));
+            if ($value === '') {
+                continue;
+            }
+            if (str_contains($value, 'video') || str_contains($value, 'mp4')) {
+                return 'video';
+            }
+            if (str_contains($value, 'image') || str_contains($value, 'img') || str_contains($value, 'photo')) {
+                return 'image';
+            }
+        }
+
+        foreach (['mime', 'mimeType', 'contentType'] as $key) {
+            if (!isset($ad[$key]) || !is_string($ad[$key])) {
+                continue;
+            }
+            $mime = strtolower(trim($ad[$key]));
+            if (str_starts_with($mime, 'video/')) {
+                return 'video';
+            }
+            if (str_starts_with($mime, 'image/')) {
+                return 'image';
+            }
+        }
+
+        $candidates = [];
+        if (isset($ad['filename']) && is_string($ad['filename'])) {
+            $candidates[] = $ad['filename'];
+        }
+        if ($name !== null) {
+            $candidates[] = $name;
+        }
+        if ($url !== null) {
+            $path = parse_url($url, PHP_URL_PATH);
+            if (is_string($path) && $path !== '') {
+                $candidates[] = $path;
+            }
+        }
+
+        $videoExt = ['mp4', 'webm', 'mov', 'avi', 'm4v', 'mkv', 'wmv'];
+        $imageExt = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
+
+        foreach ($candidates as $candidate) {
+            $ext = strtolower(pathinfo($candidate, PATHINFO_EXTENSION));
+            if ($ext === '') {
+                continue;
+            }
+            if (in_array($ext, $videoExt, true)) {
+                return 'video';
+            }
+            if (in_array($ext, $imageExt, true)) {
+                return 'image';
+            }
+        }
+
+        return 'image';
     }
 
     private function sanitizeFileName(string $name): string
