@@ -24,6 +24,83 @@ class Sync {
         }
     }
 
+    /**
+     * How many barcodes to fetch to top the printer queue up to $target.
+     * Returns 0 while the queue is still at/above $threshold (no fetch yet),
+     * otherwise the gap to $target. Pure (no I/O) — unit tested.
+     */
+    public static function needToRefill(int $count, int $threshold, int $target): int
+    {
+        if ($count >= $threshold) {
+            return 0;
+        }
+
+        return max(0, $target - $count);
+    }
+
+    /**
+     * Pick which candidate barcodes to insert: drop anything already in $existingSet,
+     * drop blanks and internal duplicates, cap to $need. Candidates may be plain strings
+     * or rows shaped like ['barcode' => '...']. $existingSet may be a plain list of
+     * barcodes (e.g. a PDO FETCH_COLUMN result) or an already-flipped lookup map.
+     * Pure (no I/O) — unit tested.
+     */
+    public static function selectNewBarcodes(array $candidates, array $existingSet, int $need): array
+    {
+        if ($need <= 0) {
+            return [];
+        }
+
+        $taken = [];
+        foreach ($existingSet as $key => $value) {
+            // List form: integer key, barcode in the value. Flipped-map form: barcode in the key.
+            $barcode = is_int($key) ? (string) $value : (string) $key;
+            if ($barcode !== '') {
+                $taken[$barcode] = true;
+            }
+        }
+
+        $out = [];
+        $seen = [];
+        foreach ($candidates as $candidate) {
+            $barcode = is_array($candidate) ? (string) ($candidate['barcode'] ?? '') : (string) $candidate;
+            if ($barcode === '' || isset($taken[$barcode]) || isset($seen[$barcode])) {
+                continue;
+            }
+            $seen[$barcode] = true;
+            $out[] = $barcode;
+            if (count($out) >= $need) {
+                break;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Coupon-queue refill filter: pick candidates to insert, excluding both barcodes
+     * already queued in printer_barcode ($poolBarcodes) and barcodes already consumed by
+     * a transaction ($usedBarcodes from user_transaction). A number used in any transaction
+     * must never re-enter the queue, or the machine would print a duplicate coupon.
+     * Pure (no I/O) — unit tested.
+     */
+    public static function selectCouponsToInsert(array $candidates, array $poolBarcodes, array $usedBarcodes, int $need): array
+    {
+        $taken = array_merge(array_values($poolBarcodes), array_values($usedBarcodes));
+
+        return self::selectNewBarcodes($candidates, $taken, $need);
+    }
+
+    /**
+     * How far short of the refill target we landed after filtering ($need wanted,
+     * $selectedCount actually inserted). > 0 means the queue could not be topped up,
+     * which is the starvation-warning signal. Pure (no I/O) — unit tested.
+     */
+    public static function refillShortfall(int $need, int $selectedCount): int
+    {
+        return max(0, $need - $selectedCount);
+    }
+
     private function queueOffline(string $path, string $endpoint, array $payload, ?string $kind = null, ?string $error = null): void {
         try {
             $entry = [
@@ -756,14 +833,9 @@ class Sync {
             $targetMax = 50;
 
             $existingCount = (int)($pdo->query("SELECT COUNT(*) FROM printer_barcode")->fetchColumn() ?? 0);
-            if ($existingCount >= $thresholdMin) {
-                $this->log->log('INFO', sprintf('Printer queue OK (>= %d) — no fetch.', $thresholdMin));
-                return;
-            }
-
-            $need = max(0, $targetMax - $existingCount);
+            $need = self::needToRefill($existingCount, $thresholdMin, $targetMax);
             if ($need === 0) {
-                $this->log->log('INFO', 'Nothing to add (already at target).');
+                $this->log->log('INFO', sprintf('Printer queue OK (>= %d) — no fetch.', $thresholdMin));
                 return;
             }
 
@@ -802,44 +874,49 @@ class Sync {
             }
 
             $placeholders = implode(',', array_fill(0, count($normalized), '?'));
-            $checkStmt = $pdo->prepare("SELECT barcode FROM printer_barcode WHERE barcode IN ($placeholders)");
-            $checkStmt->execute($normalized);
-            $existingSet = $checkStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
-            $existingSet = array_flip($existingSet); // for O(1) lookups
 
-            $toInsert = [];
-            foreach ($normalized as $bc) {
-                if (!isset($existingSet[$bc])) {
-                    $toInsert[] = $bc;
-                    if (count($toInsert) >= $need) break; // only top up to target max
-                }
-            }
+            // Already queued in the printer pool.
+            $poolStmt = $pdo->prepare("SELECT barcode FROM printer_barcode WHERE barcode IN ($placeholders)");
+            $poolStmt->execute($normalized);
+            $poolSet = $poolStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
 
-            if (!$toInsert) {
-                $this->log->log('INFO', 'No new coupons to queue (duplicates or already full to target).');
-                return;
-            }
+            // Already consumed by a transaction — never re-queue these, or the machine
+            // would print a second coupon under a number that has already been used.
+            $usedStmt = $pdo->prepare("SELECT DISTINCT print_barcode FROM user_transaction WHERE print_barcode IN ($placeholders)");
+            $usedStmt->execute($normalized);
+            $usedSet = $usedStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
 
-            $pdo->beginTransaction();
+            $toInsert = self::selectCouponsToInsert($normalized, $poolSet, $usedSet, $need);
 
-            $ins = $pdo->prepare("INSERT IGNORE INTO printer_barcode (barcode) VALUES (:barcode)");
             $added = 0;
-            foreach ($toInsert as $bc) {
-                $ins->execute([':barcode' => $bc]);
-                $added += (int)$ins->rowCount();
-                if ($existingCount + $added >= $targetMax) break;
+            if ($toInsert) {
+                $pdo->beginTransaction();
+                $ins = $pdo->prepare("INSERT IGNORE INTO printer_barcode (barcode) VALUES (:barcode)");
+                foreach ($toInsert as $bc) {
+                    $ins->execute([':barcode' => $bc]);
+                    $added += (int)$ins->rowCount();
+                }
+                if ($pdo->inTransaction()) $pdo->commit();
             }
 
-            if ($pdo->inTransaction()) $pdo->commit();
+            $shortfall = self::refillShortfall($need, $added);
+            $logCtx = [
+                'candidates'    => count($normalized),
+                'excluded_pool' => count($poolSet),
+                'excluded_used' => count($usedSet),
+                'added'         => $added,
+                'need'          => $need,
+                'target'        => $targetMax,
+                'total'         => $existingCount + $added,
+                'endpoint'      => 'coupons',
+            ];
 
-            $this->log->log('INFO', 'Queued barcodes from coupons API', [
-                'requested' => count($toInsert),
-                'added' => $added,
-                'total' => $existingCount + $added,
-                'threshold' => $thresholdMin,
-                'target' => $targetMax,
-                'endpoint' => 'coupons',
-            ]);
+            if ($shortfall > 0) {
+                $logCtx['shortfall'] = $shortfall;
+                $this->log->log('WARN', 'Printer queue under target after filtering used/queued barcodes', $logCtx);
+            } else {
+                $this->log->log('INFO', 'Queued barcodes from coupons API', $logCtx);
+            }
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) { try { $pdo->rollBack(); } catch (Throwable) {} }
             $this->log->log('ERROR', 'Coupons queue update failed (non-fatal)', ['error' => $e->getMessage()]);
