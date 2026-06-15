@@ -78,15 +78,21 @@ class Sync {
     }
 
     /**
-     * Coupon-queue refill filter: pick candidates to insert, excluding both barcodes
-     * already queued in printer_barcode ($poolBarcodes) and barcodes already consumed by
-     * a transaction ($usedBarcodes from user_transaction). A number used in any transaction
-     * must never re-enter the queue, or the machine would print a duplicate coupon.
+     * Coupon-queue refill filter: pick candidates to insert, excluding any barcode that is
+     * already taken in one of the three local states — queued in printer_barcode
+     * ($poolBarcodes), in-flight in the command table ($inflightBarcodes), or already
+     * consumed by a transaction ($usedBarcodes from user_transaction). A number in any of
+     * these must never re-enter the queue, or the machine would print a duplicate coupon
+     * (COMP re-offers numbers whose issue never succeeded on their side).
      * Pure (no I/O) — unit tested.
      */
-    public static function selectCouponsToInsert(array $candidates, array $poolBarcodes, array $usedBarcodes, int $need): array
+    public static function selectCouponsToInsert(array $candidates, array $poolBarcodes, array $inflightBarcodes, array $usedBarcodes, int $need): array
     {
-        $taken = array_merge(array_values($poolBarcodes), array_values($usedBarcodes));
+        $taken = array_merge(
+            array_values($poolBarcodes),
+            array_values($inflightBarcodes),
+            array_values($usedBarcodes)
+        );
 
         return self::selectNewBarcodes($candidates, $taken, $need);
     }
@@ -880,13 +886,19 @@ class Sync {
             $poolStmt->execute($normalized);
             $poolSet = $poolStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
 
+            // In-flight in the command table — a number pulled from the pool and currently
+            // being processed/printed, not yet a completed transaction.
+            $inflightStmt = $pdo->prepare("SELECT DISTINCT printer_barcode FROM command WHERE printer_barcode IN ($placeholders)");
+            $inflightStmt->execute($normalized);
+            $inflightSet = $inflightStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
             // Already consumed by a transaction — never re-queue these, or the machine
             // would print a second coupon under a number that has already been used.
             $usedStmt = $pdo->prepare("SELECT DISTINCT print_barcode FROM user_transaction WHERE print_barcode IN ($placeholders)");
             $usedStmt->execute($normalized);
             $usedSet = $usedStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
 
-            $toInsert = self::selectCouponsToInsert($normalized, $poolSet, $usedSet, $need);
+            $toInsert = self::selectCouponsToInsert($normalized, $poolSet, $inflightSet, $usedSet, $need);
 
             $added = 0;
             if ($toInsert) {
@@ -901,14 +913,15 @@ class Sync {
 
             $shortfall = self::refillShortfall($need, $added);
             $logCtx = [
-                'candidates'    => count($normalized),
-                'excluded_pool' => count($poolSet),
-                'excluded_used' => count($usedSet),
-                'added'         => $added,
-                'need'          => $need,
-                'target'        => $targetMax,
-                'total'         => $existingCount + $added,
-                'endpoint'      => 'coupons',
+                'candidates'       => count($normalized),
+                'excluded_pool'    => count($poolSet),
+                'excluded_command' => count($inflightSet),
+                'excluded_used'    => count($usedSet),
+                'added'            => $added,
+                'need'             => $need,
+                'target'           => $targetMax,
+                'total'            => $existingCount + $added,
+                'endpoint'         => 'coupons',
             ];
 
             if ($shortfall > 0) {
