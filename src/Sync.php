@@ -107,7 +107,22 @@ class Sync {
         return max(0, $need - $selectedCount);
     }
 
+    /**
+     * Which payload kinds belong in the offline retry queue. Only transactions:
+     * heartbeat/status are point-in-time (a stale retry is worthless) and bins are
+     * re-derived from the DB cursor each cycle. Pure (no I/O) — unit tested.
+     */
+    public static function isQueueable(?string $kind): bool
+    {
+        return $kind === 'transactions';
+    }
+
     private function queueOffline(string $path, string $endpoint, array $payload, ?string $kind = null, ?string $error = null): void {
+        // Enforce the policy centrally: drop non-transaction kinds so the queue can't
+        // bloat with heartbeat/status/bins during a network outage.
+        if (!self::isQueueable($kind)) {
+            return;
+        }
         try {
             $entry = [
                 'endpoint' => $endpoint,
@@ -196,7 +211,7 @@ class Sync {
         } catch (Throwable $e) {
             $payload = ['machineId' => $machineId, 'timestamp' => gmdate('c'), 'kind' => 'heartbeat'];
             $this->queueOffline($queueFile, '/heartbeat', $payload, 'heartbeat', $e->getMessage());
-            $this->log->log('WARN', 'Heartbeat queued', ['error'=>$e->getMessage()]);
+            $this->log->log('WARN', 'Heartbeat failed', ['error'=>$e->getMessage()]);
         }
     }
 
@@ -685,7 +700,7 @@ class Sync {
                 'data'       => ['command' => null],
             ];
             $this->queueOffline($queueFile, '/status', $payload, 'status', $e->getMessage());
-            $this->log->log('WARN', 'Queued status (DB read failed)', ['error' => $e->getMessage()]);
+            $this->log->log('WARN', 'Status skipped (DB read failed)', ['error' => $e->getMessage()]);
 
             try { $this->flushQueue($http, $queueFile); } catch (Throwable) {}
             return;
@@ -727,7 +742,7 @@ class Sync {
             ];
             $this->queueOffline($queueFile, '/status', $queuedPayload, 'status', $e->getMessage());
 
-            $this->log->log('WARN', 'Queued status (offline)', [
+            $this->log->log('WARN', 'Status push failed', [
                 'error'      => $e->getMessage(),
                 'command_id' => $statusRow['id'] ?? null,
             ]);
@@ -826,7 +841,7 @@ class Sync {
                 'data' => ['empty_records' => []],
             ];
             $this->queueOffline($queueFile, '/bins', is_array($payload) ? $payload : $fallbackPayload, 'sync_bins', $e->getMessage());
-            $this->log->log('WARN', 'Queued bins sync (offline)', ['error' => $e->getMessage()]);
+            $this->log->log('WARN', 'Bins sync failed', ['error' => $e->getMessage()]);
         }
 
         // try to flush after attempts
