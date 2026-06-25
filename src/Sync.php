@@ -992,21 +992,25 @@ class Sync {
                 }
             }
 
-            $newHash = $apiMd5 !== null
-                ? ('md5:' . $apiMd5)
-                : hash('sha256', json_encode($adverts));
-            $oldHash = $snap['adverts_hash'] ?? null;
-            if ($newHash === $oldHash) {
-                $this->log->log('INFO', 'Adverts unchanged - skipping download and DB update');
-                return;
-            }
-
             $imageDir = (string)($this->cfg['paths']['advertsDir'] ?? 'C:\\phpStudy\\PHPTutorial\\WWW\\downadpic\\img');
             $videoDir = (string)($this->cfg['paths']['advertsVideoDir'] ?? 'C:\\phpStudy\\PHPTutorial\\WWW\\advideo\\video');
             foreach ([$imageDir, $videoDir] as $dir) {
                 if (!is_dir($dir)) {
                     @mkdir($dir, 0777, true);
                 }
+            }
+
+            $newHash = $apiMd5 !== null
+                ? ('md5:' . $apiMd5)
+                : hash('sha256', json_encode($adverts));
+            $oldHash = $snap['adverts_hash'] ?? null;
+            if ($newHash === $oldHash && $this->advertFilesPresent($adverts, $imageDir, $videoDir)) {
+                $this->log->log('INFO', 'Adverts unchanged and local files present - skipping download and DB update');
+                return;
+            }
+
+            if ($newHash === $oldHash) {
+                $this->log->log('INFO', 'Adverts unchanged but at least one local file is missing - refreshing adverts');
             }
 
             $savedPaths = [
@@ -1022,54 +1026,21 @@ class Sync {
                     continue;
                 }
 
-                $slot = $this->normalizeAdvertSlot($ad['slot'] ?? $slotKey);
-                if ($slot === null) {
+                $local = $this->buildAdvertLocalFile($slotKey, $ad, $imageDir, $videoDir);
+                if ($local === null) {
                     continue;
                 }
-
-                if (!empty($ad['placeholder'])) {
-                    $this->log->log('INFO', sprintf('Advert %s is placeholder, skipping download', $slot));
-                    $savedPaths[$slot] = null;
-                    continue;
-                }
-
-                $url = isset($ad['url']) && is_string($ad['url']) ? $ad['url'] : null;
-                if ($url === null || $url === '') {
-                    $this->log->log('WARN', sprintf('Advert %s has no URL, skipping', $slot));
-                    continue;
-                }
-
-                $nameFromApi = $ad['name'] ?? null;
-                $nameFromApi = is_string($nameFromApi) ? $nameFromApi : null;
-                $mediaKind = $this->detectAdvertMediaKind($ad, $url, $nameFromApi);
-                if ($nameFromApi) {
-                    $fileName = $slot . '_' . $this->sanitizeFileName((string)$nameFromApi);
-                } else {
-                    $basename = basename(parse_url($url, PHP_URL_PATH) ?: '');
-                    if ($basename === '' || $basename === '/') {
-                        $basename = $slot . '.bin';
-                    }
-                    $fileName = $slot . '_' . $this->sanitizeFileName($basename);
-                }
-
-                if ($mediaKind === 'video' && !preg_match('/\.[A-Za-z0-9]{2,5}$/', $fileName)) {
-                    $fileName .= '.mp4';
-                }
-
-                $targetDir = $mediaKind === 'video' ? $videoDir : $imageDir;
-                $targetPath = rtrim($targetDir, '\\/') . DIRECTORY_SEPARATOR . $fileName;
-                $relativePath = ($mediaKind === 'video' ? 'video/' : 'img/') . $fileName;
 
                 try {
-                    $data = $this->downloadBinary($url);
+                    $data = $this->downloadBinary($local['url']);
 
-                    $this->atomicWrite($targetPath, $data);
-                    $this->log->log('INFO', sprintf('Downloaded advert %s (%s) to %s', $slot, $mediaKind, $targetPath));
-                    $savedPaths[$slot] = $relativePath;
+                    $this->atomicWrite($local['targetPath'], $data);
+                    $this->log->log('INFO', sprintf('Downloaded advert %s (%s) to %s', $local['slot'], $local['mediaKind'], $local['targetPath']));
+                    $savedPaths[$local['slot']] = $local['relativePath'];
                 } catch (Throwable $e) {
-                    $this->log->log('WARN', sprintf('Failed to download advert %s', $slot), [
+                    $this->log->log('WARN', sprintf('Failed to download advert %s', $local['slot']), [
                         'error' => $e->getMessage(),
-                        'url' => $url,
+                        'url' => $local['url'],
                     ]);
                     continue;
                 }
@@ -1169,7 +1140,7 @@ class Sync {
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_TIMEOUT => 30,
             CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_SSL_VERIFYHOST => 0,
         ]);
 
         $data = curl_exec($ch);
@@ -1189,6 +1160,95 @@ class Sync {
         }
 
         return $data;
+    }
+
+    private function advertFilesPresent(array $adverts, string $imageDir, string $videoDir): bool
+    {
+        $expected = 0;
+        foreach ($adverts as $slotKey => $ad) {
+            if (!is_array($ad)) {
+                continue;
+            }
+
+            $local = $this->buildAdvertLocalFile($slotKey, $ad, $imageDir, $videoDir, false);
+            if ($local === null) {
+                continue;
+            }
+
+            $expected++;
+            if (!is_file($local['targetPath']) || filesize($local['targetPath']) === 0) {
+                $this->log->log('INFO', 'Advert local file missing', [
+                    'slot' => $local['slot'],
+                    'path' => $local['targetPath'],
+                ]);
+                return false;
+            }
+        }
+
+        return $expected > 0;
+    }
+
+    private function buildAdvertLocalFile(mixed $slotKey, array $ad, string $imageDir, string $videoDir, bool $logSkipped = true): ?array
+    {
+        $slot = $this->normalizeAdvertSlot($ad['slot'] ?? $slotKey);
+        if ($slot === null) {
+            return null;
+        }
+
+        if (!empty($ad['placeholder'])) {
+            if ($logSkipped) {
+                $this->log->log('INFO', sprintf('Advert %s is placeholder, skipping download', $slot));
+            }
+            return null;
+        }
+
+        $url = $this->extractAdvertUrl($ad);
+        if ($url === null) {
+            if ($logSkipped) {
+                $this->log->log('WARN', sprintf('Advert %s has no URL, skipping', $slot));
+            }
+            return null;
+        }
+
+        $nameFromApi = $ad['name'] ?? null;
+        $nameFromApi = is_string($nameFromApi) ? $nameFromApi : null;
+        $mediaKind = $this->detectAdvertMediaKind($ad, $url, $nameFromApi);
+
+        if ($nameFromApi !== null && trim($nameFromApi) !== '') {
+            $baseName = $nameFromApi;
+        } else {
+            $baseName = basename(parse_url($url, PHP_URL_PATH) ?: '');
+            if ($baseName === '' || $baseName === '/') {
+                $baseName = $slot . '.bin';
+            }
+        }
+
+        $fileName = $slot . '_' . $this->sanitizeFileNameWithExtension($baseName, $ad, $mediaKind);
+        $targetDir = $mediaKind === 'video' ? $videoDir : $imageDir;
+
+        return [
+            'slot' => $slot,
+            'url' => $url,
+            'mediaKind' => $mediaKind,
+            'targetPath' => rtrim($targetDir, '\\/') . DIRECTORY_SEPARATOR . $fileName,
+            'relativePath' => ($mediaKind === 'video' ? 'video/' : 'img/') . $fileName,
+        ];
+    }
+
+    private function extractAdvertUrl(array $ad): ?string
+    {
+        foreach (['url', 'downloadUrl', 'download_url', 'src', 'source'] as $key) {
+            if (!isset($ad[$key]) || !is_string($ad[$key])) {
+                continue;
+            }
+
+            $url = trim($ad[$key]);
+            if ($url !== '') {
+                return $url;
+            }
+        }
+
+        return null;
     }
 
     private function normalizeAdvertSlot(mixed $slotRaw): ?string
@@ -1263,6 +1323,9 @@ class Sync {
         if (isset($ad['filename']) && is_string($ad['filename'])) {
             $candidates[] = $ad['filename'];
         }
+        if (isset($ad['extension']) && is_string($ad['extension'])) {
+            $candidates[] = 'file.' . ltrim($ad['extension'], '.');
+        }
         if ($name !== null) {
             $candidates[] = $name;
         }
@@ -1297,5 +1360,28 @@ class Sync {
         $clean = preg_replace('/[^A-Za-z0-9._-]/', '_', $name) ?? '';
         $clean = trim($clean, '._-');
         return $clean !== '' ? $clean : 'file.bin';
+    }
+
+    private function sanitizeFileNameWithExtension(string $name, array $ad, string $mediaKind): string
+    {
+        $fileName = $this->sanitizeFileName($name);
+        if (preg_match('/\.[A-Za-z0-9]{2,5}$/', $fileName)) {
+            return $fileName;
+        }
+
+        $extension = null;
+        if (isset($ad['extension']) && is_string($ad['extension'])) {
+            $candidate = strtolower(trim($ad['extension']));
+            $candidate = ltrim($candidate, '.');
+            if (preg_match('/^[a-z0-9]{2,5}$/', $candidate)) {
+                $extension = $candidate;
+            }
+        }
+
+        if ($extension === null) {
+            $extension = $mediaKind === 'video' ? 'mp4' : 'jpg';
+        }
+
+        return $fileName . '.' . $extension;
     }
 }
