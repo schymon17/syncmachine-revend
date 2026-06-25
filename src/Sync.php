@@ -1020,6 +1020,7 @@ class Sync {
                 'p4' => null,
                 'p5' => null,
             ];
+            $savedKinds = [];
 
             foreach ($adverts as $slotKey => $ad) {
                 if (!is_array($ad)) {
@@ -1036,7 +1037,11 @@ class Sync {
 
                     $this->atomicWrite($local['targetPath'], $data);
                     $this->log->log('INFO', sprintf('Downloaded advert %s (%s) to %s', $local['slot'], $local['mediaKind'], $local['targetPath']));
+                    if (($savedKinds[$local['slot']] ?? null) === 'video' && $local['mediaKind'] !== 'video') {
+                        continue;
+                    }
                     $savedPaths[$local['slot']] = $local['relativePath'];
+                    $savedKinds[$local['slot']] = $local['mediaKind'];
                 } catch (Throwable $e) {
                     $this->log->log('WARN', sprintf('Failed to download advert %s', $local['slot']), [
                         'error' => $e->getMessage(),
@@ -1195,14 +1200,14 @@ class Sync {
             return null;
         }
 
-        if (!empty($ad['placeholder'])) {
+        $url = $this->extractAdvertUrl($ad);
+        if (!empty($ad['placeholder']) && $url === null) {
             if ($logSkipped) {
                 $this->log->log('INFO', sprintf('Advert %s is placeholder, skipping download', $slot));
             }
             return null;
         }
 
-        $url = $this->extractAdvertUrl($ad);
         if ($url === null) {
             if ($logSkipped) {
                 $this->log->log('WARN', sprintf('Advert %s has no URL, skipping', $slot));
