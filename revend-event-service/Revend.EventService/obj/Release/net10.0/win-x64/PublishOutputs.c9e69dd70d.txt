@@ -1,6 +1,0 @@
-/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventService/bin/Release/net10.0/win-x64/publish/appsettings.Development.json
-/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventService/bin/Release/net10.0/win-x64/publish/appsettings.json
-/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventService/bin/Release/net10.0/win-x64/publish/Revend.EventService.pdb
-/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventService/bin/Release/net10.0/win-x64/publish/aspnetcorev2_inprocess.dll
-/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventService/bin/Release/net10.0/win-x64/publish/e_sqlite3.dll
-/Users/szymonszymczyna/Documents/Projects/syncmachine-revend/revend-event-service/Revend.EventService/bin/Release/net10.0/win-x64/publish/Revend.EventService.exe
