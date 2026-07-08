@@ -1,0 +1,17 @@
+[project]
+name = "sync-new-machine"
+version = "0.1.0"
+description = "Revend machine sync desktop app"
+requires-python = ">=3.11"
+dependencies = [
+    "PyMySQL>=1.1.1",
+    "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+

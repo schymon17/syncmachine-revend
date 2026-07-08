@@ -1,0 +1,40 @@
+{
+  "config_done": true,
+  "machine_id": "DEV_MACHINE_001",
+  "integration": "dev",
+  "address": "Docker dev machine",
+  "database": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "qcs",
+    "username": "root",
+    "password": "chushengfeng123"
+  },
+  "api": {
+    "base_url": "http://127.0.0.1:8000/api/revend/machine/v2",
+    "token": "",
+    "registration_url": "http://127.0.0.1:8000/api/revend/machine/v2/register",
+    "config_url": "http://127.0.0.1:8000/api/revend/machine/v2/config",
+    "timeout_seconds": 30,
+    "connect_timeout_seconds": 10,
+    "max_payload_bytes": 5242880
+  },
+  "sync": {
+    "enabled_transactions": true,
+    "enabled_bins": true,
+    "enabled_status": true,
+    "enabled_heartbeat": true,
+    "enabled_eans": false,
+    "enabled_coupons": false,
+    "enabled_adverts": false,
+    "outbox_poll_seconds": 2,
+    "heartbeat_interval_seconds": 300,
+    "remote_refresh_seconds": 300,
+    "transaction_overlap_seconds": 300,
+    "transaction_batch": 500,
+    "max_transactions_per_payload": 120,
+    "max_rows_per_payload": 3000,
+    "bins_batch": 1000,
+    "install_triggers": true
+  }
+}

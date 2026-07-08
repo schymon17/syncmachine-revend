@@ -1,0 +1,21 @@
+services:
+  machine-db:
+    image: mysql:8.4
+    container_name: revend-sync-machine-db
+    network_mode: bridge
+    command: ["--log-bin-trust-function-creators=1"]
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: qcs
+      MYSQL_ROOT_PASSWORD: chushengfeng123
+      TZ: Europe/Warsaw
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./docker/mysql/data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pchushengfeng123"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

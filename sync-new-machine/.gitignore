@@ -1,0 +1,9 @@
+.venv/
+.venv-tk/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+.ruff_cache/
+docker/mysql/data/
