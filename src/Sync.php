@@ -468,10 +468,13 @@ class Sync {
                 return false;
             }
 
-            $limitIds = max(1, (int)($this->cfg['sync']['transBatch'] ?? 500));
             $maxTransactionsPerPayload = max(1, (int)($this->cfg['sync']['transMaxTransactionsPerPayload'] ?? 120));
             $maxRowsPerPayload = max(1, (int)($this->cfg['sync']['transMaxRowsPerPayload'] ?? 3000));
             $maxRowsPerTransaction = max(1, (int)($this->cfg['sync']['transMaxRowsPerTransaction'] ?? 1500));
+            $limitIds = min(
+                max(1, (int)($this->cfg['sync']['transBatch'] ?? 500)),
+                $maxTransactionsPerPayload
+            );
 
             $idsSql =
                 "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
@@ -486,10 +489,13 @@ class Sync {
             }
 
             $transactionIds = [];
+            $selectedMaxDatelineById = [];
             foreach ($idRows as $row) {
                 $tid = (string)($row['transactionId'] ?? '');
                 if ($tid === '') continue;
+                if (isset($selectedMaxDatelineById[$tid])) continue;
                 $transactionIds[] = $tid;
+                $selectedMaxDatelineById[$tid] = (int)($row['max_dateline'] ?? 0);
             }
 
             if (!$transactionIds) {
@@ -498,8 +504,12 @@ class Sync {
             }
 
             $placeholders = implode(',', array_fill(0, count($transactionIds), '?'));
-            $rowsStmt = $pdo->prepare("SELECT * FROM user_transaction WHERE print_barcode IN ($placeholders) ORDER BY print_barcode ASC, dateline ASC");
-            $rowsStmt->execute($transactionIds);
+            $rowsStmt = $pdo->prepare(
+                "SELECT * FROM user_transaction
+                 WHERE print_barcode IN ($placeholders)
+                 ORDER BY FIELD(print_barcode, $placeholders), dateline ASC"
+            );
+            $rowsStmt->execute(array_merge($transactionIds, $transactionIds));
             $data = [];
             $rowsCount = 0;
             $maxSentDateline = $lastSync;
@@ -509,7 +519,15 @@ class Sync {
                 if (!$transactionId) continue;
 
                 if (!isset($data[$transactionId])) {
-                    if (count($data) >= $maxTransactionsPerPayload || $rowsCount >= $maxRowsPerPayload) {
+                    if (count($data) >= $maxTransactionsPerPayload) {
+                        break;
+                    }
+                    if ($rowsCount >= $maxRowsPerPayload) {
+                        $this->log->log('WARN', 'Transactions payload row limit reached before next transaction', [
+                            'rows' => $rowsCount,
+                            'limit' => $maxRowsPerPayload,
+                            'deferred_transaction' => $transactionId,
+                        ]);
                         break;
                     }
                     $data[$transactionId] = ['details' => [], 'last_transaction_time' => null, '_last_transaction_ts' => 0];
@@ -532,10 +550,15 @@ class Sync {
                     $data[$transactionId]['_last_transaction_ts'] = $dateline;
                     $data[$transactionId]['last_transaction_time'] = $formattedTime;
                 }
-
-                if ($dateline > $maxSentDateline) $maxSentDateline = $dateline;
             }
             $rowsStmt->closeCursor();
+
+            foreach (array_keys($data) as $sentTransactionId) {
+                $sentMaxDateline = (int)($selectedMaxDatelineById[$sentTransactionId] ?? 0);
+                if ($sentMaxDateline > $maxSentDateline) {
+                    $maxSentDateline = $sentMaxDateline;
+                }
+            }
 
             foreach ($data as &$transaction) {
                 unset($transaction['_last_transaction_ts']);
@@ -970,11 +993,8 @@ class Sync {
                 throw new RuntimeException('Empty adverts body');
             }
 
-            if (isset($body['adverts'])) {
-                $adverts = $body['adverts'];
-            } elseif (isset($body['data']['adverts'])) {
-                $adverts = $body['data']['adverts'];
-            } else {
+            $adverts = $this->extractAdvertsFromBody($body);
+            if ($adverts === null) {
                 $this->log->log('INFO', 'No adverts section in API response');
                 return;
             }
@@ -985,8 +1005,9 @@ class Sync {
             }
 
             $apiMd5 = null;
-            if (isset($body['md5']) && is_string($body['md5'])) {
-                $md5 = strtolower(trim($body['md5']));
+            $md5Raw = $body['md5'] ?? $body['data']['md5'] ?? $body['data']['attributes']['md5'] ?? null;
+            if (is_string($md5Raw)) {
+                $md5 = strtolower(trim($md5Raw));
                 if ($md5 !== '') {
                     $apiMd5 = $md5;
                 }
@@ -1013,15 +1034,19 @@ class Sync {
                 $this->log->log('INFO', 'Adverts unchanged but at least one local file is missing - refreshing adverts');
             }
 
+            $currentPaths = $this->readCurrentAdvertPaths($pdo, $machineId);
             $savedPaths = [
-                'p1' => null,
-                'p2' => null,
-                'p3' => null,
-                'p4' => null,
-                'p5' => null,
+                'p1' => $currentPaths['p_down0'] ?? null,
+                'p2' => $currentPaths['p_down1'] ?? null,
+                'p3' => $currentPaths['p_down2'] ?? null,
+                'p4' => $currentPaths['p_down3'] ?? null,
+                'p5' => $currentPaths['p_down4'] ?? null,
             ];
             $savedKinds = [];
-            $vTop0 = null;
+            $vTop0 = $currentPaths['v_top0'] ?? null;
+            $downloadAttempts = 0;
+            $downloaded = 0;
+            $downloadFailures = 0;
 
             foreach ($adverts as $slotKey => $ad) {
                 if (!is_array($ad)) {
@@ -1033,10 +1058,12 @@ class Sync {
                     continue;
                 }
 
+                $downloadAttempts++;
                 try {
                     $data = $this->downloadBinary($local['url']);
 
                     $this->atomicWrite($local['targetPath'], $data);
+                    $downloaded++;
                     $this->log->log('INFO', sprintf('Downloaded advert %s (%s) to %s', $local['slot'], $local['mediaKind'], $local['targetPath']));
                     if ($local['mediaKind'] === 'video') {
                         $vTop0 = $local['relativePath'];
@@ -1049,12 +1076,17 @@ class Sync {
                     $savedPaths[$local['slot']] = $local['relativePath'];
                     $savedKinds[$local['slot']] = $local['mediaKind'];
                 } catch (Throwable $e) {
+                    $downloadFailures++;
                     $this->log->log('WARN', sprintf('Failed to download advert %s', $local['slot']), [
                         'error' => $e->getMessage(),
                         'url' => $local['url'],
                     ]);
                     continue;
                 }
+            }
+
+            if ($downloadAttempts > 0 && $downloaded === 0) {
+                throw new RuntimeException('No advert files downloaded; keeping existing DB paths');
             }
 
             $pDown0 = $savedPaths['p1'] ?? null;
@@ -1121,8 +1153,15 @@ class Sync {
                 ]);
             }
 
-            $snap['adverts_hash'] = $newHash;
-            $this->safeSnapshotWrite($snapshotFile, $snap);
+            if ($downloadFailures === 0) {
+                $snap['adverts_hash'] = $newHash;
+                $this->safeSnapshotWrite($snapshotFile, $snap);
+            } else {
+                $this->log->log('WARN', 'Adverts partially refreshed; hash not advanced so failed files will retry', [
+                    'downloaded' => $downloaded,
+                    'failed' => $downloadFailures,
+                ]);
+            }
 
             $this->log->log('INFO', 'Updated machineinformation adverts paths', [
                 'mid' => $machineId,
@@ -1176,6 +1215,86 @@ class Sync {
         }
 
         return $data;
+    }
+
+    private function extractAdvertsFromBody(mixed $body): ?array
+    {
+        if (!is_array($body)) {
+            return null;
+        }
+
+        $candidates = [
+            $body['adverts'] ?? null,
+            $body['data']['adverts'] ?? null,
+            $body['data']['attributes']['adverts'] ?? null,
+            $body['attributes']['adverts'] ?? null,
+            $body['data']['attributes'] ?? null,
+            $body['attributes'] ?? null,
+            $body,
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (is_array($candidate) && $this->looksLikeAdvertCollection($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private function looksLikeAdvertCollection(array $items): bool
+    {
+        foreach ($items as $key => $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            foreach (['url', 'downloadUrl', 'download_url', 'src', 'source'] as $urlKey) {
+                if (isset($item[$urlKey])) {
+                    return true;
+                }
+            }
+
+            if (isset($item['placeholder']) || isset($item['slot'])) {
+                return true;
+            }
+
+            if (is_string($key) && $this->normalizeAdvertSlot($key) !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function readCurrentAdvertPaths(PDO $pdo, string $machineId): array
+    {
+        $columns = 'p_down0, p_down1, p_down2, p_down3, p_down4, v_top0';
+
+        try {
+            $stmt = $pdo->prepare("SELECT $columns FROM machineinformation WHERE mid = ? LIMIT 1");
+            $stmt->execute([$machineId]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (is_array($row) && $row) {
+                return $row;
+            }
+        } catch (Throwable $e) {
+            $this->log->log('WARN', 'Failed to read current advert paths by mid', [
+                'mid' => $machineId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $stmt = $pdo->query("SELECT $columns FROM machineinformation LIMIT 1");
+            $row = $stmt?->fetch(PDO::FETCH_ASSOC);
+            return is_array($row) ? $row : [];
+        } catch (Throwable $e) {
+            $this->log->log('WARN', 'Failed to read current advert paths fallback', [
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
     }
 
     private function advertFilesPresent(array $adverts, string $imageDir, string $videoDir): bool
