@@ -1021,6 +1021,7 @@ class Sync {
                 'p5' => null,
             ];
             $savedKinds = [];
+            $vTop0 = null;
 
             foreach ($adverts as $slotKey => $ad) {
                 if (!is_array($ad)) {
@@ -1037,6 +1038,11 @@ class Sync {
 
                     $this->atomicWrite($local['targetPath'], $data);
                     $this->log->log('INFO', sprintf('Downloaded advert %s (%s) to %s', $local['slot'], $local['mediaKind'], $local['targetPath']));
+                    if ($local['mediaKind'] === 'video') {
+                        $vTop0 = $local['relativePath'];
+                        continue;
+                    }
+
                     if (($savedKinds[$local['slot']] ?? null) === 'video' && $local['mediaKind'] !== 'video') {
                         continue;
                     }
@@ -1062,7 +1068,8 @@ class Sync {
                     p_down1 = ?,
                     p_down2 = ?,
                     p_down3 = ?,
-                    p_down4 = ?
+                    p_down4 = ?,
+                    v_top0 = ?
                 WHERE mid = ?";
 
             $stmt = $pdo->prepare($sql);
@@ -1072,6 +1079,7 @@ class Sync {
                 $pDown2,
                 $pDown3,
                 $pDown4,
+                $vTop0,
                 $machineId,
             ]);
 
@@ -1087,7 +1095,8 @@ class Sync {
                                 p_down1 = ?,
                                 p_down2 = ?,
                                 p_down3 = ?,
-                                p_down4 = ?
+                                p_down4 = ?,
+                                v_top0 = ?
                             LIMIT 1";
 
                 $stmt2 = $pdo->prepare($fallbackSql);
@@ -1097,6 +1106,7 @@ class Sync {
                     $pDown2,
                     $pDown3,
                     $pDown4,
+                    $vTop0,
                 ]);
 
                 $affectedFallback = $stmt2->rowCount();
@@ -1121,6 +1131,7 @@ class Sync {
                 'p_down2' => $pDown2,
                 'p_down3' => $pDown3,
                 'p_down4' => $pDown4,
+                'v_top0' => $vTop0,
             ]);
         } catch (Throwable $e) {
             $this->log->log('ERROR', 'Adverts step failed (non-fatal)', [
@@ -1270,7 +1281,7 @@ class Sync {
         if (preg_match('/^v([1-9][0-9]*)$/', $slot, $m)) {
             $videoSlot = (int)$m[1];
             if ($videoSlot === 1) {
-                // API zwraca v1 jako 5. slot reklamowy (p_down4)
+                // API zwraca v1 jako slot wideo zapisywany w v_top0.
                 return 'p5';
             }
             return null;
