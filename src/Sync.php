@@ -1101,7 +1101,11 @@ class Sync {
                     p_down2 = ?,
                     p_down3 = ?,
                     p_down4 = ?,
-                    v_top0 = ?
+                    v_top0 = ?,
+                    v_top1 = ?,
+                    v_top2 = ?,
+                    v_top3 = ?,
+                    v_top4 = ?
                 WHERE mid = ?";
 
             $stmt = $pdo->prepare($sql);
@@ -1111,6 +1115,10 @@ class Sync {
                 $pDown2,
                 $pDown3,
                 $pDown4,
+                $vTop0,
+                $vTop0,
+                $vTop0,
+                $vTop0,
                 $vTop0,
                 $machineId,
             ]);
@@ -1128,7 +1136,11 @@ class Sync {
                                 p_down2 = ?,
                                 p_down3 = ?,
                                 p_down4 = ?,
-                                v_top0 = ?
+                                v_top0 = ?,
+                                v_top1 = ?,
+                                v_top2 = ?,
+                                v_top3 = ?,
+                                v_top4 = ?
                             LIMIT 1";
 
                 $stmt2 = $pdo->prepare($fallbackSql);
@@ -1138,6 +1150,10 @@ class Sync {
                     $pDown2,
                     $pDown3,
                     $pDown4,
+                    $vTop0,
+                    $vTop0,
+                    $vTop0,
+                    $vTop0,
                     $vTop0,
                 ]);
 
@@ -1331,12 +1347,6 @@ class Sync {
         }
 
         $url = $this->extractAdvertUrl($ad);
-        if (!empty($ad['placeholder']) && $url === null) {
-            if ($logSkipped) {
-                $this->log->log('INFO', sprintf('Advert %s is placeholder, skipping download', $slot));
-            }
-            return null;
-        }
 
         if ($url === null) {
             if ($logSkipped) {
