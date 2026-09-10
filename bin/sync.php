@@ -5,6 +5,7 @@ require __DIR__ . '/../src/Logger.php';
 require __DIR__ . '/../src/Db.php';
 require __DIR__ . '/../src/DbDiff.php';
 require __DIR__ . '/../src/Http.php';
+require __DIR__ . '/../src/TransactionOutbox.php';
 require __DIR__ . '/../src/Sync.php';
 require __DIR__ . '/../src/Bootstrap.php';
 
@@ -128,12 +129,37 @@ try {
         case 'daemon':
             ensure_bootstrap($config, $configBasic, $log);
             $cfgArr = $config->load();
-            $interval = max(10, (int)($cfgArr['sync']['intervalSeconds'] ?? 60));
+            // Transactions are the latency-sensitive part of the sync. Older
+            // configs only contain intervalSecondsTrans, while some builds used
+            // intervalSeconds. Honour both, but cap the cadence at 20 seconds so
+            // an existing machine config cannot silently restore the old
+            // one-minute delay after this client is deployed.
+            $interval = Sync::transactionIntervalSeconds($cfgArr);
             $sync = new Sync($cfgArr, $log);
-            $log->log('INFO', 'Daemon started', ['interval' => $interval]);
+            $outboxAvailable = $sync->installTransactionOutbox();
+            $outboxPollSeconds = max(0.2, min(2.0, (float)($cfgArr['sync']['outboxPollSeconds'] ?? 1.0)));
+            $nextFallbackAt = microtime(true);
+            $log->log('INFO', 'Daemon started', [
+                'fallback_interval' => $interval,
+                'transaction_outbox' => $outboxAvailable,
+                'outbox_poll_seconds' => $outboxPollSeconds,
+            ]);
             while (true) {
+                $cycleStartedAt = microtime(true);
                 try {
-                    $sync->runOnce();
+                    if ($outboxAvailable) {
+                        $sync->runTransactionOutbox();
+                    }
+
+                    $now = microtime(true);
+                    if ($now >= $nextFallbackAt) {
+                        $fallbackStartedAt = $now;
+                        $sync->runDaemonCycle();
+                        $nextFallbackAt = $fallbackStartedAt + $interval;
+                        if ($nextFallbackAt < microtime(true)) {
+                            $nextFallbackAt = microtime(true);
+                        }
+                    }
                 } catch (Throwable $e) {
                     $log->log('ERROR', 'Daemon iteration failed (continuing)', [
                         'error' => $e->getMessage(),
@@ -141,7 +167,15 @@ try {
                         'line' => $e->getLine(),
                     ]);
                 }
-                sleep($interval);
+
+                // The indexed outbox is cheap to poll and reacts in about one
+                // second. The full cursor scan remains a 20-second safety net.
+                $remaining = $outboxAvailable
+                    ? $outboxPollSeconds - (microtime(true) - $cycleStartedAt)
+                    : $nextFallbackAt - microtime(true);
+                if ($remaining > 0) {
+                    usleep((int)round($remaining * 1_000_000));
+                }
             }
             break;
 

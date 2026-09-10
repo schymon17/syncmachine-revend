@@ -15,7 +15,7 @@
         "token": ""
     },
     "sync": {
-        "intervalSecondsTrans": 60,
+        "intervalSecondsTrans": 20,
         "enabledTrans": true,
         "intervalSecondsEans": 60,
         "enabledEans": true,
@@ -25,6 +25,7 @@
         "enabledAdverts": true,
         "intervalSecondsCoupons": 60,
         "enabledCoupons": true,
+        "outboxPollSeconds": 1,
         "outboxForceRecreateTriggers": true
     },
     "address": "",

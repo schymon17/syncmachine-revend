@@ -1,7 +1,27 @@
 <?php
 
 class Sync {
+    private array $lastDaemonStepAt = [];
+    private ?string $lastTransactionError = null;
+
     public function __construct(private array $cfg, private Logger $log) {}
+
+    /**
+     * Resolve the latency-sensitive daemon cadence across old and new config
+     * shapes. Existing installations may still contain 60 seconds, therefore
+     * the client enforces the 20-second delivery target after an update.
+     */
+    public static function transactionIntervalSeconds(array $cfg): int
+    {
+        $configured = (int)(
+            $cfg['sync']['intervalSecondsTrans']
+            ?? $cfg['sync']['intervalSeconds']
+            ?? 20
+        );
+
+        return min(20, max(5, $configured));
+    }
+
     private function atomicWrite(string $path, string $data): void {
         try {
             $tmp = $path.'.tmp';
@@ -233,7 +253,133 @@ class Sync {
             || (str_contains($msg, '1146') && str_contains($msg, "doesn't exist"));
     }
 
-    public function runOnce(): void {
+    public function installTransactionOutbox(): bool
+    {
+        if (!($this->cfg['sync']['enabledTrans'] ?? false)) {
+            return false;
+        }
+
+        try {
+            $pdo = Db::pdo($this->cfg['db']);
+            $outbox = new TransactionOutbox($pdo);
+            $outbox->install((bool)($this->cfg['sync']['outboxForceRecreateTriggers'] ?? true));
+            $this->log->log('INFO', 'Transaction outbox and DB triggers ready');
+            return true;
+        } catch (Throwable $e) {
+            $this->log->log('WARN', 'Transaction outbox unavailable; cursor fallback remains active', [
+                'error' => $e->getMessage(),
+            ]);
+            return false;
+        }
+    }
+
+    public function runTransactionOutbox(): bool
+    {
+        $machineId = (string)($this->cfg['machineId'] ?? '');
+        if ($machineId === '') {
+            return false;
+        }
+
+        $outbox = null;
+        $eventIds = [];
+        try {
+            $pdo = Db::pdo($this->cfg['db']);
+            $outbox = new TransactionOutbox($pdo);
+            $events = $outbox->claim(50);
+            if (!$events) {
+                return false;
+            }
+
+            $eventIds = array_map(static fn (array $row): int => (int)$row['id'], $events);
+            $transactionIds = array_values(array_unique(array_filter(array_map(
+                static fn (array $row): string => trim((string)$row['source_pk']),
+                $events
+            ))));
+
+            $paths = $this->cfg['paths'] ?? [];
+            $snapshotFile = $paths['snapshot'] ?? __DIR__.'/var/sync/snapshot.json';
+            $queueFile = $paths['queue'] ?? __DIR__.'/var/sync/queue.log';
+            $snap = $this->readJsonFile($snapshotFile);
+            $http = $this->createHttpClient();
+
+            $sent = $this->runTransactions(
+                $pdo,
+                $http,
+                $snapshotFile,
+                $queueFile,
+                $snap,
+                $machineId,
+                $transactionIds,
+                false
+            );
+
+            if ($sent || $this->lastTransactionError === null) {
+                // No payload without an error means the transaction was already
+                // covered by the fallback scan or is no longer relevant.
+                $outbox->markDone($eventIds);
+            } else {
+                $outbox->markFailed($eventIds, $this->lastTransactionError);
+            }
+
+            return $sent;
+        } catch (Throwable $e) {
+            if ($outbox instanceof TransactionOutbox && $eventIds) {
+                try {
+                    $outbox->markFailed($eventIds, $e->getMessage());
+                } catch (Throwable) {
+                    // The 20-second cursor fallback remains authoritative. A
+                    // stale processing event is also reclaimed on restart.
+                }
+            }
+            $this->log->log('WARN', 'Transaction outbox iteration failed; fallback remains active', [
+                'error' => $e->getMessage(),
+            ]);
+            return false;
+        }
+    }
+
+    private function createHttpClient(): Http
+    {
+        return new Http(
+            $this->cfg['api']['baseUrl'] ?? '',
+            $this->cfg['api']['token'] ?? null,
+            max(1, (int)($this->cfg['api']['timeoutSeconds'] ?? 30)),
+            max(1, (int)($this->cfg['api']['connectTimeoutSeconds'] ?? 10)),
+            max(262144, (int)($this->cfg['api']['maxPayloadBytes'] ?? 5242880)),
+            max(262144, (int)($this->cfg['api']['maxResponseBytes'] ?? 8388608))
+        );
+    }
+
+    public function runOnce(): void
+    {
+        $this->runCycle(false);
+    }
+
+    /**
+     * Run the fast transaction loop while retaining the configured cadence for
+     * heavier ancillary endpoints. This avoids tripling EAN, advert, coupon,
+     * status and bin traffic when transaction polling changes from 60s to 20s.
+     */
+    public function runDaemonCycle(): void
+    {
+        $this->runCycle(true);
+    }
+
+    private function daemonStepDue(string $step, string $configKey, int $defaultInterval = 60): bool
+    {
+        $now = microtime(true);
+        $interval = max(1, (int)($this->cfg['sync'][$configKey] ?? $defaultInterval));
+        $lastRunAt = $this->lastDaemonStepAt[$step] ?? null;
+
+        if ($lastRunAt !== null && ($now - $lastRunAt) < $interval) {
+            return false;
+        }
+
+        $this->lastDaemonStepAt[$step] = $now;
+        return true;
+    }
+
+    private function runCycle(bool $throttleAncillary): void {
         $machineId = $this->cfg['machineId'] ?? '';
         if ($machineId === '') {
             $this->log->log('ERROR','Machine ID empty'); return;
@@ -256,14 +402,7 @@ class Sync {
         }
 
         $snap = $this->readJsonFile($snapshotFile);
-        $http = new Http(
-            $this->cfg['api']['baseUrl'] ?? '',
-            $this->cfg['api']['token'] ?? null,
-            max(1, (int)($this->cfg['api']['timeoutSeconds'] ?? 30)),
-            max(1, (int)($this->cfg['api']['connectTimeoutSeconds'] ?? 10)),
-            max(262144, (int)($this->cfg['api']['maxPayloadBytes'] ?? 5242880)),
-            max(262144, (int)($this->cfg['api']['maxResponseBytes'] ?? 8388608))
-        );
+        $http = $this->createHttpClient();
 
         if (($this->cfg['sync']['enabledTrans'] ?? false) && $pdo) {
             $this->runTransactions($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
@@ -272,36 +411,48 @@ class Sync {
         }
         $this->flushQueue($http, $queueFile);
 
-        if ($this->cfg['sync']['enabledEans'] ?? false) {
-            $this->runEans($pdo, $http, $snapshotFile, $snap, $machineId);
-        } else {
-            $this->log->log('INFO','Sync disabled - Eans are disabled');
+        if (!$throttleAncillary || $this->daemonStepDue('eans', 'intervalSecondsEans')) {
+            if ($this->cfg['sync']['enabledEans'] ?? false) {
+                $this->runEans($pdo, $http, $snapshotFile, $snap, $machineId);
+            } else {
+                $this->log->log('INFO','Sync disabled - Eans are disabled');
+            }
         }
 
-        if (($this->cfg['sync']['enabledStatus'] ?? false) && $pdo) {
-            $this->runStatus($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
-        } else {
-            $this->log->log('INFO','Sync disabled - Status are disabled or DB not ready');
+        if (!$throttleAncillary || $this->daemonStepDue('status', 'intervalSecondsStatus')) {
+            if (($this->cfg['sync']['enabledStatus'] ?? false) && $pdo) {
+                $this->runStatus($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
+            } else {
+                $this->log->log('INFO','Sync disabled - Status are disabled or DB not ready');
+            }
         }
 
-        if (($this->cfg['sync']['enabledCoupons'] ?? false) && $pdo) {
-            $this->runCoupons($pdo, $http, $machineId);
-        } else {
-            $this->log->log('INFO','Sync disabled - Coupons are disabled or DB not ready');
+        if (!$throttleAncillary || $this->daemonStepDue('coupons', 'intervalSecondsCoupons')) {
+            if (($this->cfg['sync']['enabledCoupons'] ?? false) && $pdo) {
+                $this->runCoupons($pdo, $http, $machineId);
+            } else {
+                $this->log->log('INFO','Sync disabled - Coupons are disabled or DB not ready');
+            }
         }
 
-        if (($this->cfg['sync']['enabledAdverts'] ?? false) && $pdo) {
-            $this->runAdverts($pdo, $http, $snapshotFile, $snap, $machineId);
-        } else {
-            $this->log->log('INFO','Sync disabled - Adverts are disabled or DB not ready');
+        if (!$throttleAncillary || $this->daemonStepDue('adverts', 'intervalSecondsAdverts')) {
+            if (($this->cfg['sync']['enabledAdverts'] ?? false) && $pdo) {
+                $this->runAdverts($pdo, $http, $snapshotFile, $snap, $machineId);
+            } else {
+                $this->log->log('INFO','Sync disabled - Adverts are disabled or DB not ready');
+            }
         }
 
-        $this->runBins($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
+        if (!$throttleAncillary || $this->daemonStepDue('bins', 'intervalSecondsBins')) {
+            $this->runBins($pdo, $http, $snapshotFile, $queueFile, $snap, $machineId);
+        }
 
-        try {
-            $this->safeHeartbeat($http, $queueFile, $machineId);
-        } catch (Throwable $e) {
-            $this->log->log('WARN','Heartbeat failed at end (non-fatal)', ['error'=>$e->getMessage()]);
+        if (!$throttleAncillary || $this->daemonStepDue('heartbeat', 'intervalSecondsHeartbeat')) {
+            try {
+                $this->safeHeartbeat($http, $queueFile, $machineId);
+            } catch (Throwable $e) {
+                $this->log->log('WARN','Heartbeat failed at end (non-fatal)', ['error'=>$e->getMessage()]);
+            }
         }
     }
 
@@ -450,23 +601,23 @@ class Sync {
 
     /* -------------------- Steps (isolated & non-blocking) -------------------- */
 
-    private function runTransactions(PDO $pdo, Http $http, string $snapshotFile, string $queueFile, array &$snap, string $machineId): bool
+    private function runTransactions(
+        PDO $pdo,
+        Http $http,
+        string $snapshotFile,
+        string $queueFile,
+        array &$snap,
+        string $machineId,
+        ?array $requestedTransactionIds = null,
+        bool $queueOnFailure = true
+    ): bool
     {
+        $this->lastTransactionError = null;
         $payload = null;
         try {
             $lastSync = (int)($snap['user_transaction_lastSync'] ?? 0);
             $overlapBuffer = max(0, (int)($this->cfg['sync']['transOverlapBufferSeconds'] ?? 300));
             $queryLastSync = max(0, $lastSync - $overlapBuffer);
-            $checkStmt = $pdo->prepare(
-                "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) LIMIT 1"
-            );
-            $checkStmt->execute([':lastSync' => $queryLastSync]);
-            $hasFinished = (bool)$checkStmt->fetchColumn();
-
-            if (!$hasFinished) {
-                $this->log->log('INFO', 'No finished transactions (transactiondone IN 2,4,5) detected');
-                return false;
-            }
 
             $maxTransactionsPerPayload = max(1, (int)($this->cfg['sync']['transMaxTransactionsPerPayload'] ?? 120));
             $maxRowsPerPayload = max(1, (int)($this->cfg['sync']['transMaxRowsPerPayload'] ?? 3000));
@@ -476,11 +627,40 @@ class Sync {
                 $maxTransactionsPerPayload
             );
 
-            $idsSql =
-                "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
+            if ($requestedTransactionIds === null) {
+                $checkStmt = $pdo->prepare(
+                    "SELECT 1 FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) LIMIT 1"
+                );
+                $checkStmt->execute([':lastSync' => $queryLastSync]);
+                if (!(bool)$checkStmt->fetchColumn()) {
+                    $this->log->log('INFO', 'No finished transactions (transactiondone IN 2,4,5) detected');
+                    return false;
+                }
 
-            $idsStmt = $pdo->prepare($idsSql);
-            $idsStmt->execute([':lastSync' => $queryLastSync]);
+                $idsSql =
+                    "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline FROM user_transaction WHERE dateline > :lastSync AND transactiondone IN (2, 4, 5) AND print_barcode IS NOT NULL AND print_barcode <> '' GROUP BY print_barcode ORDER BY max_dateline ASC" . ($limitIds > 0 ? " LIMIT $limitIds" : "");
+                $idsStmt = $pdo->prepare($idsSql);
+                $idsStmt->execute([':lastSync' => $queryLastSync]);
+            } else {
+                $requestedTransactionIds = array_slice(array_values(array_unique(array_filter(array_map(
+                    static fn ($id): string => trim((string)$id),
+                    $requestedTransactionIds
+                )))), 0, $limitIds);
+                if (!$requestedTransactionIds) {
+                    return false;
+                }
+
+                $requestedPlaceholders = implode(',', array_fill(0, count($requestedTransactionIds), '?'));
+                $idsStmt = $pdo->prepare(
+                    "SELECT print_barcode AS transactionId, MAX(dateline) AS max_dateline
+                     FROM user_transaction
+                     WHERE print_barcode IN ($requestedPlaceholders)
+                       AND transactiondone IN (2, 4, 5)
+                     GROUP BY print_barcode
+                     ORDER BY max_dateline ASC"
+                );
+                $idsStmt->execute($requestedTransactionIds);
+            }
             $idRows = $idsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
             if (!$idRows) {
@@ -597,9 +777,14 @@ class Sync {
 
             throw new RuntimeException('Bad status ' . $status);
         } catch (Throwable $e) {
+            $this->lastTransactionError = $e->getMessage();
             if (is_array($payload)) {
-                $this->queueOffline($queueFile, '/trans', $payload, 'transactions', $e->getMessage());
-                $this->log->log('WARN', 'Queued transactions (offline)', ['error' => $e->getMessage()]);
+                if ($queueOnFailure) {
+                    $this->queueOffline($queueFile, '/trans', $payload, 'transactions', $e->getMessage());
+                    $this->log->log('WARN', 'Queued transactions (offline)', ['error' => $e->getMessage()]);
+                } else {
+                    $this->log->log('WARN', 'Outbox transaction delivery failed', ['error' => $e->getMessage()]);
+                }
             } else {
                 $this->log->log('ERROR', 'Transactions step failed before payload build', ['error' => $e->getMessage()]);
             }

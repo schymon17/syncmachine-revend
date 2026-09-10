@@ -15,7 +15,7 @@
         "token": "hZ@3wKp!9FvR^tQ1LxU#eMb7YjN&dS6oGcA%P4zT8rV+XfW2nHqZmC0iD$BsE5J"
     },
     "sync": {
-        "intervalSecondsTrans": 60,
+        "intervalSecondsTrans": 20,
         "enabledTrans": true,
         "intervalSecondsEans": 60,
         "enabledEans": true,
@@ -24,7 +24,9 @@
         "intervalSecondsAdverts": 60,
         "enabledAdverts": true,
         "intervalSecondsCoupons": 60,
-        "enabledCoupons": true
+        "enabledCoupons": true,
+        "outboxPollSeconds": 1,
+        "outboxForceRecreateTriggers": true
     },
     "address": "Kombatant\u00f3w Polskich 3D, 78-300 \u015awidwin",
     "notification_emails": [],

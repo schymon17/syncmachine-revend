@@ -15,6 +15,8 @@ Requirements
 ------------
 - Windows with PHP 8.x (CLI) available on PATH (php.exe)
   (If you use PHP Desktop's php.exe, you can call it directly: php\php.exe bin\sync.php ...)
+- MySQL user with CREATE, ALTER and TRIGGER permissions for event-driven sync.
+  Without them the agent automatically uses the 20-second cursor fallback.
 
 Configure
 ---------
@@ -26,7 +28,7 @@ Edit: data\app.config.json
       {"name":"orders","pk":"id","columns":["id","status","updated_at"]}
     ],
     "api": { "baseUrl": "https://api.example.com", "token": "YOUR_TOKEN" },
-    "sync": { "intervalSeconds": 60, "enabled": true },
+    "sync": { "intervalSecondsTrans": 20, "enabledTrans": true },
     "paths": {
       "snapshot": "data/snapshot.json",
       "queue": "data/offline-queue.jsonl",
@@ -45,6 +47,13 @@ Windows helpers
 ---------------
 - run-once.bat   (runs one cycle and pauses)
 - daemon.bat     (watchdog loop, restarts daemon on every exit)
+
+Immediate transaction delivery
+------------------------------
+The daemon installs two MySQL triggers on user_transaction. Completion state
+2, 4 or 5 writes a durable transaction_finished event to sync_outbox. The
+daemon normally sends it within one second. API/network failures are retried,
+and the regular cursor scan remains enabled as a safety net.
 
 Files
 -----
