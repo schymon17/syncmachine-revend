@@ -2,6 +2,11 @@ name: Sync agent build
 
 # Windows build of the ReVend sync agent (sync-new-machine/revend_sync).
 # Python 3.8: the last version that runs on Windows 7, still in the fleet.
+#
+# Every push to develop publishes the build to the panel as X.Y.Z-beta.<run>
+# in the beta channel (pilot machines update themselves); main publishes
+# X.Y.Z to stable for the whole fleet - bump __version__ before merging a
+# new stable release. Pull requests only build and test.
 on:
   push:
     branches: [develop, main]
@@ -32,6 +37,23 @@ jobs:
         run: |
           python -c "import tempfile, pathlib; from revend_sync import config; d = pathlib.Path(tempfile.mkdtemp()); s = 'dpapi-check-secret-0123456789'; config.write_secrets(d, {'secret': s}); assert s.encode() not in (d / 'secrets.bin').read_bytes(); assert config.read_secrets(d) == {'secret': s}; print('DPAPI OK')"
 
+      - name: Version for this build
+        shell: pwsh
+        run: |
+          $base = (python -c "import revend_sync; print(revend_sync.__version__)").Trim()
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main') {
+            $version = $base; $channel = 'stable'
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/develop') {
+            $version = "$base-beta.$env:GITHUB_RUN_NUMBER"; $channel = 'beta'
+          } else {
+            $version = "$base-dev.$env:GITHUB_RUN_NUMBER"; $channel = ''
+          }
+          (Get-Content revend_sync/__init__.py) -replace '__version__ = ".*"', "__version__ = `"$version`"" |
+            Set-Content revend_sync/__init__.py
+          "AGENT_VERSION=$version" >> $env:GITHUB_ENV
+          "AGENT_CHANNEL=$channel" >> $env:GITHUB_ENV
+          Write-Host "Building $version for channel '$channel'"
+
       - name: Build release zip
         shell: pwsh
         run: ./packaging/build-agent.ps1
@@ -43,6 +65,23 @@ jobs:
           & $exe --version
           & $exe --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "exe --help failed" }
+
+      - name: Publish to the panel
+        if: env.AGENT_CHANNEL != ''
+        shell: pwsh
+        env:
+          RELEASE_TOKEN: ${{ secrets.REVEND_AGENT_RELEASE_TOKEN }}
+          PANEL_URL: https://panel.revend.pl
+        run: |
+          if (-not $env:RELEASE_TOKEN) { throw 'The repository secret REVEND_AGENT_RELEASE_TOKEN is not set.' }
+          $zip = (Get-Item "dist/revend-sync-$env:AGENT_VERSION.zip").FullName
+          $sha = (Get-Content "$zip.sha256").Trim()
+          curl.exe --fail-with-body -sS -X POST "$env:PANEL_URL/api/revend/agent/releases" `
+            -H "Authorization: Bearer $env:RELEASE_TOKEN" -H "Accept: application/json" `
+            -F "version=$env:AGENT_VERSION" -F "channel=$env:AGENT_CHANNEL" -F "sha256=$sha" `
+            -F "notes=$env:GITHUB_REF_NAME $env:GITHUB_SHA" -F "file=@$zip;type=application/zip"
+          if ($LASTEXITCODE -ne 0) { throw "Publishing $env:AGENT_VERSION to the panel failed." }
+          Write-Host "`nPublished $env:AGENT_VERSION to the $env:AGENT_CHANNEL channel."
 
       - uses: actions/upload-artifact@v4
         with:
