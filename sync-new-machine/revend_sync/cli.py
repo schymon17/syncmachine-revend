@@ -80,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
         return _service(args.install_root, home)
     if args.command == "run":
         return _run(home)
+    if args.command in ("status", "requeue-dead", "check") and not (home / "config.json").exists():
+        print(f"Agent is not installed here (no {home / 'config.json'}).", file=sys.stderr)
+        return 1
     if args.command == "check":
         return _check(home)
     if args.command == "status":
