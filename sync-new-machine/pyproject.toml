@@ -1,17 +1,32 @@
 [project]
-name = "sync-new-machine"
-version = "0.1.0"
-description = "Revend machine sync desktop app"
-requires-python = ">=3.11"
+name = "revend-sync"
+version = "3.0.0"
+description = "ReVend machine sync agent (Machine API v2)"
+requires-python = ">=3.10"
 dependencies = [
     "PyMySQL>=1.1.1",
     "requests>=2.32.0",
 ]
 
 [project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
 build = ["pyinstaller>=6.0"]
+
+[project.scripts]
+revend-sync = "revend_sync.cli:main"
+
+[tool.setuptools]
+packages = ["revend_sync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py310"
+include = ["revend_sync/**/*.py", "tests/**/*.py"]
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+# Line length is the formatter's job; long SQL and messages stay readable on one line.
+ignore = ["E501"]
