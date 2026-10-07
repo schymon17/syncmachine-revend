@@ -34,6 +34,9 @@ class FakeApi:
         self.eans: list[dict[str, Any]] = []
         self.coupons: list[str] = []
         self.release: dict[str, Any] | None = None
+        self.adverts: dict[str, Any] = {}
+        self.files: dict[str, bytes] = {}
+        self.downloads: list[str] = []
         self.lock = threading.Lock()
         api = self
 
@@ -43,6 +46,15 @@ class FakeApi:
 
             def date_time_string(self, timestamp: float | None = None) -> str:
                 return email.utils.formatdate(time.time() + api.clock_skew, usegmt=True)
+
+            def do_GET(self) -> None:  # noqa: N802
+                name = self.path.rsplit("/", 1)[-1]
+                data = api.files.get(name)
+                api.downloads.append(name)
+                self.send_response(200 if data is not None else 404)
+                self.send_header("Content-Length", str(len(data or b"")))
+                self.end_headers()
+                self.wfile.write(data or b"")
 
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get("Content-Length", 0))
@@ -133,6 +145,8 @@ class FakeApi:
             if not self.coupons:
                 return 404, {"errors": [{"status": "404"}]}
             return 200, {"data": {"attributes": [{"barcode": c} for c in self.coupons]}}
+        if endpoint == "adverts":
+            return 200, self.adverts
         if endpoint == "register":
             return 200, {"data": {"attributes": {"registered": True, "integration": "kaucja"}}}
         if endpoint == "agent/release":

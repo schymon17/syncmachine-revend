@@ -32,6 +32,11 @@ kupony i aktualizacje agenta przychodzą.
   maszyna nigdy nie zostaje z pustą tabelą `barcode`. Odpowiedź dużo mniejsza niż obecny
   katalog nie jest importowana.
 - **Kupony** – pula `printer_barcode` uzupełniana do 50, bez numerów użytych lub drukowanych.
+- **Reklamy** co 5 min (`/adverts`): pliki do folderów www maszyny (domyślnie
+  `C:\phpStudy\PHPTutorial\WWW\downadpic\img` i `...\advideo\video`, przy instalacji
+  przejmowane z konfiguracji agenta PHP), ścieżki do `machineinformation.p_down0–4`
+  i `v_top0` – tak jak stary agent. Pobieranie strumieniowe, kontrola rozmiaru, podmiana
+  pliku atomowo; slot, którego nie udało się pobrać, zostaje przy starym pliku.
 - **Aktualizacje** co 6 h: pobranie i weryfikacja SHA-256; instalację wykonuje usługa (etap 3).
 - Jedna instancja na katalog danych (blokada pliku), zadania niezależne – błąd jednego nie
   zatrzymuje innych.
@@ -110,11 +115,6 @@ PR i pushu do `develop`/`main`: testy na Windows, test DPAPI, `packaging/build-a
 `revend-sync-<wersja>.zip` + `.sha256`. Zip wgrywa się w panelu: API v2 → Agent synchronizacji.
 
 Python 3.8, bo to ostatnia wersja działająca na Windows 7, a takie maszyny są we flocie.
-
-## Jeszcze nie ma
-
-Reklamy (`/adverts`). Na maszynie przejętej od agenta PHP reklamy przestają się
-aktualizować (wyświetlane są ostatnio pobrane) – trzeba to dodać przed wdrożeniem na flotę.
 
 ---
 

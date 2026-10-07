@@ -147,6 +147,10 @@ def _finish(
         transactions_from_id=transactions_from,
         bins_from_id=bins_from,
     )
+    advert_dirs = old.advert_dirs() if old else None
+    if advert_dirs:
+        config.adverts_image_dir = advert_dirs[0] or config.adverts_image_dir
+        config.adverts_video_dir = advert_dirs[1] or config.adverts_video_dir
     save(config, options.data_dir)
     machine_db.close()
 

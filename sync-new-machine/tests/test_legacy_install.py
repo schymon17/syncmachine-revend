@@ -37,6 +37,8 @@ def make_legacy(tmp_path, db, snapshot=None, queue=None):
                     "snapshot": "data/snapshot.json",
                     "queue": "data/offline-queue.json",
                     "log": "data/log.json",
+                    "advertsDir": "D:\\www\\img",
+                    "advertsVideoDir": "D:\\www\\video",
                 },
             }
         )
@@ -151,6 +153,7 @@ def test_install_takes_the_machine_over_from_the_old_agent(machine, tmp_path):
     assert (saved.machine_id, saved.key_id, saved.secret) == (MACHINE_ID, KEY_ID, SECRET)
     assert saved.db.password == db._settings.password and saved.db.database == db._settings.database
     assert (saved.transactions_from_id, saved.bins_from_id) == (10, 1)
+    assert (saved.adverts_image_dir, saved.adverts_video_dir) == ("D:\\www\\img", "D:\\www\\video")
     assert any("triggery" in m for m in messages)
     assert (
         db.query("SELECT COUNT(*) AS n FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE()")[

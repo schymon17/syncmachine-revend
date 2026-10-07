@@ -15,12 +15,15 @@ if (-not (Test-Path $venv)) { & $pyExe @pyArgs -m venv $venv }
 & "$venv\Scripts\python.exe" -m pip install --quiet -r packaging\requirements-agent.txt pyinstaller==5.13.2
 
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
-& "$venv\Scripts\pyinstaller.exe" --noconfirm --clean --console --name revend-sync `
-    --collect-data certifi --hidden-import revend_sync.supervisor packaging\agent_entry.py
+# --paths: the entry script lives in packaging\, the revend_sync package one level up.
+& "$venv\Scripts\pyinstaller.exe" --noconfirm --clean --console --name revend-sync --paths $root `
+    --collect-submodules revend_sync --collect-data certifi packaging\agent_entry.py
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
 
-$reported = (& dist\revend-sync\revend-sync.exe --version).Trim()
-if ($reported -ne $version) { throw "Built exe reports '$reported', expected '$version'" }
+$reported = "$(& dist\revend-sync\revend-sync.exe --version 2>&1)".Trim()
+if ($LASTEXITCODE -ne 0 -or $reported -ne $version) {
+    throw "Built exe does not work: exit $LASTEXITCODE, reports '$reported', expected '$version'"
+}
 
 $package = Join-Path $root 'dist\package'
 New-Item -ItemType Directory -Path $package | Out-Null

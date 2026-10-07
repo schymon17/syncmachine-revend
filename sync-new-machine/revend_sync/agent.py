@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymysql
 
-from . import __version__, catalog, logs, updates
+from . import __version__, adverts, catalog, logs, updates
 from .api import ApiError, Client, encode_body
 from .collectors import BinCollector, StatusCollector, TransactionCollector
 from .config import Config
@@ -88,6 +88,16 @@ class Agent:
                     6 * 3600,
                     lambda: catalog.sync_eans(self.client, self.db, store, config),
                     next_at=60,
+                    needs_db=True,
+                )
+            )
+        if config.adverts_enabled:
+            self.tasks.append(
+                Task(
+                    "adverts",
+                    300,
+                    lambda: adverts.sync_adverts(self.client, self.db, store, config),
+                    next_at=90,
                     needs_db=True,
                 )
             )
