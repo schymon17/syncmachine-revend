@@ -39,6 +39,10 @@ class Config:
     bins_from_id: int | None = None
     coupons_enabled: bool = True
     eans_enabled: bool = True
+    adverts_enabled: bool = True
+    # The machine's web folders the screen shows adverts from (old agent's defaults).
+    adverts_image_dir: str = r"C:\phpStudy\PHPTutorial\WWW\downadpic\img"
+    adverts_video_dir: str = r"C:\phpStudy\PHPTutorial\WWW\advideo\video"
 
     def url(self, endpoint: str) -> str:
         return self.api_base_url.rstrip("/") + "/" + endpoint.lstrip("/")
@@ -69,6 +73,9 @@ def load(directory: Path | None = None) -> Config:
         bins_from_id=raw.get("binsFromId"),
         coupons_enabled=bool(raw.get("couponsEnabled", True)),
         eans_enabled=bool(raw.get("eansEnabled", True)),
+        adverts_enabled=bool(raw.get("advertsEnabled", True)),
+        adverts_image_dir=raw.get("advertsImageDir") or Config.adverts_image_dir,
+        adverts_video_dir=raw.get("advertsVideoDir") or Config.adverts_video_dir,
     )
 
 
@@ -88,6 +95,9 @@ def save(config: Config, directory: Path | None = None) -> None:
         },
         "couponsEnabled": config.coupons_enabled,
         "eansEnabled": config.eans_enabled,
+        "advertsEnabled": config.adverts_enabled,
+        "advertsImageDir": config.adverts_image_dir,
+        "advertsVideoDir": config.adverts_video_dir,
     }
     if config.transactions_from_id is not None:
         raw["transactionsFromId"] = config.transactions_from_id

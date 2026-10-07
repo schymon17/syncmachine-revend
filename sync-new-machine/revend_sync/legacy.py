@@ -38,6 +38,14 @@ class LegacyAgent:
     def daemon_bat(self) -> Path:
         return self.root / "daemon.bat"
 
+    def advert_dirs(self) -> tuple[str, str] | None:
+        """The old agent's advert folders, if it had them configured (paths.advertsDir/advertsVideoDir)."""
+        paths = self.config.get("paths") if isinstance(self.config.get("paths"), dict) else {}
+        image, video = paths.get("advertsDir"), paths.get("advertsVideoDir")
+        if image or video:
+            return str(image or ""), str(video or "")
+        return None
+
     def db_settings(self) -> DbSettings | None:
         db = self.config.get("db")
         if not isinstance(db, dict) or not db.get("database"):

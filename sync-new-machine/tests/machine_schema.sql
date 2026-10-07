@@ -59,6 +59,17 @@ CREATE TABLE barcode (
     UNIQUE KEY barcode_unique (barcode)
 ) DEFAULT CHARSET=utf8;
 
+CREATE TABLE machineinformation (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    mid VARCHAR(64) NULL,
+    p_down0 VARCHAR(255) NULL,
+    p_down1 VARCHAR(255) NULL,
+    p_down2 VARCHAR(255) NULL,
+    p_down3 VARCHAR(255) NULL,
+    p_down4 VARCHAR(255) NULL,
+    v_top0 VARCHAR(255) NULL
+) DEFAULT CHARSET=utf8;
+
 CREATE TABLE printer_barcode (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     barcode VARCHAR(64) NOT NULL,
