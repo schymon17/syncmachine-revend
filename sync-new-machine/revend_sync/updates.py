@@ -35,6 +35,8 @@ def check(
         return None
 
     version = str(release["version"])
+    if version in _failed_versions(updates_dir.parent):
+        return None
     ready = updates_dir / "ready.json"
     if ready.exists() and json.loads(ready.read_text(encoding="utf-8")).get("version") == version:
         return version
@@ -64,3 +66,13 @@ def check(
     )
     log.info("Update %s downloaded and verified; it will be installed by the service", version)
     return version
+
+
+def _failed_versions(data_dir: Path) -> list[str]:
+    """Versions the supervisor rolled back - never downloaded again."""
+    try:
+        return list(
+            json.loads((data_dir / "update-state.json").read_text(encoding="utf-8")).get("failed", [])
+        )
+    except (OSError, ValueError):
+        return []

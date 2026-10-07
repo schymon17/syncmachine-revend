@@ -1,0 +1,53 @@
+name: Sync agent build
+
+# Windows build of the ReVend sync agent (sync-new-machine/revend_sync).
+# Python 3.8: the last version that runs on Windows 7, still in the fleet.
+on:
+  push:
+    branches: [develop, main]
+    paths: ["sync-new-machine/**", ".github/workflows/agent-build.yml"]
+  pull_request:
+    paths: ["sync-new-machine/**", ".github/workflows/agent-build.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: sync-new-machine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Unit tests on Windows
+        run: |
+          python -m pip install --quiet -r packaging/requirements-agent.txt pytest
+          python -m pytest -q
+
+      - name: DPAPI round trip
+        run: |
+          python -c "import tempfile, pathlib; from revend_sync import config; d = pathlib.Path(tempfile.mkdtemp()); config.write_secrets(d, {'secret': 'x'}); assert b'x' not in (d / 'secrets.bin').read_bytes(); assert config.read_secrets(d) == {'secret': 'x'}; print('DPAPI OK')"
+
+      - name: Build release zip
+        shell: pwsh
+        run: ./packaging/build-agent.ps1
+
+      - name: Smoke test the packaged exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist/package/revend-sync/revend-sync.exe
+          & $exe --version
+          & $exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "exe --help failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: revend-sync-agent
+          path: |
+            sync-new-machine/dist/revend-sync-*.zip
+            sync-new-machine/dist/revend-sync-*.zip.sha256
+          retention-days: 90

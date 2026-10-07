@@ -2,57 +2,18 @@
 
 from __future__ import annotations
 
-import os
 import time
-import uuid
-from pathlib import Path
-
-import pymysql
-import pytest
 
 from revend_sync import catalog
 from revend_sync.agent import Agent
 from revend_sync.collectors import BinCollector, StatusCollector, TransactionCollector
 from revend_sync.config import Config
-from revend_sync.machine_db import DbSettings, MachineDb
 from revend_sync.sender import Sender
 
 from .fake_api import KEY_ID, MACHINE_ID, SECRET
+from .mysql_support import insert_item, requires_mysql
 
-SERVERS = [s for s in os.environ.get("REVEND_TEST_MYSQL", "").split(",") if s]
-pytestmark = pytest.mark.skipif(not SERVERS, reason="REVEND_TEST_MYSQL not set")
-SCHEMA = "\n".join(
-    line
-    for line in (Path(__file__).parent / "machine_schema.sql").read_text().splitlines()
-    if not line.lstrip().startswith("--")
-)
-
-
-@pytest.fixture(params=SERVERS or ["none"])
-def machine(request):
-    host, port = request.param.split(":")
-    name = "qcs_" + uuid.uuid4().hex[:8]
-    admin = pymysql.connect(host=host, port=int(port), user="root", password="test", autocommit=True)
-    with admin.cursor() as cursor:
-        cursor.execute(f"CREATE DATABASE {name}")
-        cursor.execute(f"USE {name}")
-        for statement in filter(str.strip, SCHEMA.split(";")):
-            cursor.execute(statement)
-    db = MachineDb(DbSettings(host=host, port=int(port), database=name, user="root", password="test"))
-    assert db.check_schema() == []
-    yield db, admin
-    db.close()
-    with admin.cursor() as cursor:
-        cursor.execute(f"DROP DATABASE {name}")
-    admin.close()
-
-
-def insert_item(db, coupon, dateline, done=0, status="1", metal="0", id=None):
-    db.execute(
-        "INSERT INTO user_transaction (id, transactionid, dateline, barcode, metal, recognitionstatus, print_barcode, "
-        "bottlevalue, weight, transactiondone) VALUES (%s, %s, %s, '5901234123457', %s, %s, %s, '5', '18', %s)",
-        (id, "T" + str(coupon), dateline, metal, status, coupon, done),
-    )
+pytestmark = requires_mysql
 
 
 def config_for(api_base, db):

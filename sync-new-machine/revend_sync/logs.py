@@ -87,14 +87,14 @@ class PanelHandler(logging.Handler):
             self.handleError(record)
 
 
-def setup(log_dir: Path, store: Store | None, debug: bool = False) -> None:
+def setup(log_dir: Path, store: Store | None, debug: bool = False, filename: str = "agent.log") -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(logging.DEBUG if debug else logging.INFO)
 
     file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "agent.log", maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_COUNT, encoding="utf-8"
+        log_dir / filename, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_COUNT, encoding="utf-8"
     )
     file_handler.setFormatter(JsonFormatter())
     root.addHandler(file_handler)

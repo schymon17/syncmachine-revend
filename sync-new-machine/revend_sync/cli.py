@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import IO
 
-from . import __version__, logs
+from . import __version__, installer, logs
 from . import config as config_module
 from .agent import Agent
 from .api import ApiError, Client, encode_body
@@ -40,6 +40,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     enroll.add_argument("--bins-from-id", type=int, help="first empty_record id to send (default: new only)")
 
+    install = commands.add_parser("install", help="install on this machine (run as administrator)")
+    source = install.add_mutually_exclusive_group(required=True)
+    source.add_argument("--code", help="installation code from the machine page in the panel")
+    source.add_argument("--enrollment-file", type=Path, help="enrollment saved by the panel's install.ps1")
+    install.add_argument("--panel", default=installer.DEFAULT_PANEL)
+    install.add_argument("--legacy-dir", type=Path, help="old PHP agent folder (found automatically)")
+    install.add_argument("--db-host")
+    install.add_argument("--db-port", type=int)
+    install.add_argument("--db-name")
+    install.add_argument("--db-user")
+    install.add_argument("--db-password")
+    install.add_argument("--install-root", type=Path, default=None)
+    install.add_argument("--keep-legacy", action="store_true", help="do not stop the old PHP agent")
+
+    uninstall = commands.add_parser("uninstall", help="stop the agent and remove it from autostart")
+    uninstall.add_argument(
+        "--restore-legacy", action="store_true", help="give the old PHP agent its autostart back"
+    )
+
+    service = commands.add_parser("service", help="supervisor started by launcher.cmd")
+    service.add_argument("--install-root", type=Path, required=True)
+
     commands.add_parser("check", help="check the machine database and the API connection")
     commands.add_parser("status", help="show the queue and recent rejections")
     commands.add_parser("requeue-dead", help="send rejected messages again (after a server-side fix)")
@@ -49,6 +71,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "enroll":
         return _enroll(args, home)
+    if args.command == "install":
+        return _install(args, home)
+    if args.command == "uninstall":
+        installer.uninstall(home, args.restore_legacy)
+        return 0
+    if args.command == "service":
+        return _service(args.install_root, home)
     if args.command == "run":
         return _run(home)
     if args.command == "check":
@@ -91,6 +120,53 @@ def _enroll(args: argparse.Namespace, home: Path) -> int:
     config_module.save(config, home)
     print(f"Enrolled {config.machine_id} (key {config.key_id})")
     return 0
+
+
+def _install(args: argparse.Namespace, home: Path) -> int:
+    options = installer.InstallOptions(
+        code=args.code,
+        enrollment_file=args.enrollment_file,
+        panel_url=args.panel,
+        legacy_dir=args.legacy_dir,
+        db_host=args.db_host,
+        db_port=args.db_port,
+        db_name=args.db_name,
+        db_user=args.db_user,
+        db_password=args.db_password,
+        data_dir=home,
+        stop_legacy=not args.keep_legacy,
+    )
+    if args.install_root:
+        options.install_root = args.install_root
+    try:
+        installer.install(options)
+    except installer.InstallError as error:
+        print(f"BLAD: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _service(install_root: Path, home: Path) -> int:
+    from .supervisor import Supervisor
+
+    home.mkdir(parents=True, exist_ok=True)
+    lock = _single_instance(home / "supervisor.lock")
+    if lock is None:
+        return 3
+    store = Store(home / "agent.db")
+    logs.setup(home / "logs", store, filename="supervisor.log")
+    supervisor = Supervisor(install_root, home)
+
+    def stop(*_: object) -> None:
+        supervisor.stop()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, stop)  # type: ignore[attr-defined]
+    code = supervisor.run()
+    store.close()
+    return code
 
 
 def _run(home: Path) -> int:
