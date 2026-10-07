@@ -30,7 +30,7 @@ jobs:
 
       - name: DPAPI round trip
         run: |
-          python -c "import tempfile, pathlib; from revend_sync import config; d = pathlib.Path(tempfile.mkdtemp()); config.write_secrets(d, {'secret': 'x'}); assert b'x' not in (d / 'secrets.bin').read_bytes(); assert config.read_secrets(d) == {'secret': 'x'}; print('DPAPI OK')"
+          python -c "import tempfile, pathlib; from revend_sync import config; d = pathlib.Path(tempfile.mkdtemp()); s = 'dpapi-check-secret-0123456789'; config.write_secrets(d, {'secret': s}); assert s.encode() not in (d / 'secrets.bin').read_bytes(); assert config.read_secrets(d) == {'secret': s}; print('DPAPI OK')"
 
       - name: Build release zip
         shell: pwsh
