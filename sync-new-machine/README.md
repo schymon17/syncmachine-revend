@@ -68,12 +68,53 @@ REVEND_TEST_MYSQL=127.0.0.1:33057,127.0.0.1:33080 .venv/bin/python -m pytest   #
 Atrapa API (`tests/fake_api.py`) weryfikuje podpis HMAC, okno czasu, nonce, idempotencję
 i reguły `/trans` tak jak serwer. Wektor podpisu w `tests/test_api.py` jest policzony w PHP.
 
-## Etap 3 (jeszcze nie ma)
+## Instalacja na maszynie
 
-Paczka Windows (PyInstaller) z `install.ps1` w katalogu głównym (kontrakt:
-`docs/integrations/MACHINE_API.md` w repo API), usługa Windows z restartem po awarii,
-instalacja pobranej aktualizacji z cofnięciem, przejęcie maszyny od agenta PHP
-(kursor z jego `snapshot.json`), reklamy (`/adverts`).
+Kod instalacyjny generuje superadmin w karcie maszyny w panelu (jednorazowy, 24 h).
+
+- **Windows 10/11** – PowerShell jako administrator:
+  `& ([scriptblock]::Create((irm https://panel.revend.pl/agent/install.ps1))) -Code RV-XXXX-XXXX-XXXX`
+  (skrypt z panelu pobiera paczkę, sprawdza SHA-256 i uruchamia jej `install.ps1`).
+- **Windows 7** (PowerShell 2.0 nie ma TLS 1.2) – skopiuj zip na maszynę, rozpakuj
+  i uruchom jako administrator `install.cmd RV-XXXX-XXXX-XXXX`.
+
+Obie drogi kończą się w `revend-sync.exe install`, który:
+
+1. wymienia kod na klucz API maszyny,
+2. znajduje starego agenta PHP (proces, Autostart, `--legacy-dir`), bierze z jego
+   `data/app.config.json` ustawienia bazy, zatrzymuje pętlę `daemon.bat` i `php sync.php`,
+   przenosi jego wpisy z folderu Autostart do kopii (`legacy-backup`), zmienia nazwę
+   `daemon.bat` i usuwa jego triggery `sync_*` piszące do `sync_outbox`,
+3. ustawia punkt startu z jego `snapshot.json` (godzina zakładki + niewysłana kolejka
+   offline; nadwyżkę serwer deduplikuje po kuponie), bez starego agenta – ostatnia doba,
+4. kopiuje program do `C:\Program Files\ReVend\Sync\versions\<wersja>` i rejestruje
+   zadanie „ReVend Sync” (SYSTEM, przy starcie, restart po awarii).
+
+Gdy coś się nie uda po zatrzymaniu starego agenta, instalator przywraca jego autostart.
+Odinstalowanie: `revend-sync.cmd uninstall --restore-legacy`.
+
+## Usługa i aktualizacje
+
+Zadanie uruchamia `launcher.cmd`, a ten nadzorcę (`revend-sync.exe service`) z wersji
+wskazanej w `current.txt`. Nadzorca trzyma agenta przy życiu (restart po awarii: 5, 10, 20,
+40, 60 s). Gdy agent pobierze i sprawdzi aktualizację, nadzorca rozpakowuje ją do własnego
+katalogu wersji, sprawdza, że nowy exe startuje i zgłasza swoją wersję, przełącza
+`current.txt` i kończy pracę – launcher uruchamia nową wersję. Nowa wersja jest na próbie
+5 minut: 3 awarie w tym czasie = powrót do poprzedniej, a wadliwej wersji agent już nie pobierze.
+
+## Budowanie paczki
+
+GitHub Actions (`.github/workflows/agent-build.yml`, Windows, Python 3.8) przy każdym
+PR i pushu do `develop`/`main`: testy na Windows, test DPAPI, `packaging/build-agent.ps1`
+(PyInstaller 5.13, zależności przypięte w `packaging/requirements-agent.txt`) i artefakt
+`revend-sync-<wersja>.zip` + `.sha256`. Zip wgrywa się w panelu: API v2 → Agent synchronizacji.
+
+Python 3.8, bo to ostatnia wersja działająca na Windows 7, a takie maszyny są we flocie.
+
+## Jeszcze nie ma
+
+Reklamy (`/adverts`). Na maszynie przejętej od agenta PHP reklamy przestają się
+aktualizować (wyświetlane są ostatnio pobrane) – trzeba to dodać przed wdrożeniem na flotę.
 
 ---
 
