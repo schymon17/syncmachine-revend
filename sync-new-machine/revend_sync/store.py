@@ -15,6 +15,7 @@ import json
 import sqlite3
 import time
 import uuid
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,6 +46,15 @@ CREATE TABLE IF NOT EXISTS sent_transactions (
     item_count INTEGER NOT NULL,
     queued_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sent_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    body BLOB NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    sent_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sent_archive_sent_at ON sent_archive (sent_at);
 CREATE TABLE IF NOT EXISTS log_buffer (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     logged_at TEXT NOT NULL,
@@ -54,7 +64,15 @@ CREATE TABLE IF NOT EXISTS log_buffer (
 );
 """
 
-# Rejected messages are kept this long for diagnosis, then dropped.
+# Transactions and seals are transaction data: the operators' RVM
+# recommendations (point 11.8) require the machine to keep a full copy for
+# at least 12 weeks after it reached the ReVend cloud. The machine's own
+# database is vendor software with unknown retention, so the agent keeps
+# the exact bodies it sent, compressed, in sent_archive.
+ARCHIVED_KINDS = ("trans", "bins")
+ARCHIVE_RETENTION_SECONDS = 84 * 86400
+# Rejected messages are kept this long for diagnosis, then dropped -
+# rejected transaction data as long as the archive.
 DEAD_RETENTION_SECONDS = 30 * 86400
 # Fingerprints of sent transactions - long enough to cover any resend window.
 SENT_RETENTION_SECONDS = 14 * 86400
@@ -139,7 +157,22 @@ class Store:
         ]
 
     def delivered(self, message_id: int) -> None:
-        self._db.execute("DELETE FROM outbox WHERE id = ?", (message_id,))
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT kind, body, idempotency_key, created_at FROM outbox WHERE id = ?", (message_id,)
+            ).fetchone()
+            if row is not None and row["kind"] in ARCHIVED_KINDS:
+                db.execute(
+                    "INSERT INTO sent_archive (kind, body, idempotency_key, created_at, sent_at) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        row["kind"],
+                        zlib.compress(bytes(row["body"])),
+                        row["idempotency_key"],
+                        row["created_at"],
+                        time.time(),
+                    ),
+                )
+            db.execute("DELETE FROM outbox WHERE id = ?", (message_id,))
 
     def retry_later(self, message_id: int, delay: float, error: str, *, new_key: bool = False) -> None:
         if new_key:
@@ -194,6 +227,30 @@ class Store:
             (time.time(),),
         )
         return cursor.rowcount
+
+    # --- sent archive -----------------------------------------------------
+
+    def archive_stats(self) -> dict[str, Any]:
+        row = self._db.execute(
+            "SELECT COUNT(*) AS messages, MIN(sent_at) AS oldest, COALESCE(SUM(LENGTH(body)), 0) AS bytes FROM sent_archive"
+        ).fetchone()
+        return {"messages": int(row["messages"]), "oldest_sent_at": row["oldest"], "bytes": int(row["bytes"])}
+
+    def archived(self, since: float = 0.0) -> Iterator[dict[str, Any]]:
+        """Sent transactions and seals from the archive, oldest first, with their bodies decoded."""
+        cursor = self._db.execute(
+            "SELECT id, kind, body, idempotency_key, created_at, sent_at FROM sent_archive WHERE sent_at >= ? ORDER BY id",
+            (since,),
+        )
+        for row in cursor:
+            yield {
+                "id": row["id"],
+                "kind": row["kind"],
+                "createdAt": row["created_at"],
+                "sentAt": row["sent_at"],
+                "idempotencyKey": row["idempotency_key"],
+                "body": json.loads(zlib.decompress(bytes(row["body"])).decode("utf-8")),
+            }
 
     # --- state ------------------------------------------------------------
 
@@ -258,10 +315,16 @@ class Store:
     def prune(self) -> None:
         now = time.time()
         with self.transaction() as db:
+            archived = ",".join("?" * len(ARCHIVED_KINDS))
             db.execute(
-                "DELETE FROM outbox WHERE status = 'dead' AND next_attempt_at < ?",
-                (now - DEAD_RETENTION_SECONDS,),
+                f"DELETE FROM outbox WHERE status = 'dead' AND kind NOT IN ({archived}) AND next_attempt_at < ?",
+                (*ARCHIVED_KINDS, now - DEAD_RETENTION_SECONDS),
             )
+            db.execute(
+                f"DELETE FROM outbox WHERE status = 'dead' AND kind IN ({archived}) AND next_attempt_at < ?",
+                (*ARCHIVED_KINDS, now - ARCHIVE_RETENTION_SECONDS),
+            )
+            db.execute("DELETE FROM sent_archive WHERE sent_at < ?", (now - ARCHIVE_RETENTION_SECONDS,))
             db.execute("DELETE FROM sent_transactions WHERE queued_at < ?", (now - SENT_RETENTION_SECONDS,))
             db.execute(
                 "DELETE FROM log_buffer WHERE id <= (SELECT MAX(id) FROM log_buffer) - ?", (LOG_BUFFER_MAX,)

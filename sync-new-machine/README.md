@@ -15,6 +15,10 @@ kupony i aktualizacje agenta przychodzą.
   (`agent.db`, WAL, `synchronous=FULL`) razem z kursorem, w jednej transakcji.
   Awaria, brak prądu albo tydzień bez internetu niczego nie gubią ani nie dublują.
   Po powrocie łącza kolejka wysyła się sama, od najstarszych.
+- **Archiwum wysłanych danych.** Transakcje i worki przyjęte przez API zostają w `agent.db`
+  (tabela `sent_archive`, dokładna treść, skompresowana) przez 84 dni od wysyłki – zalecenia
+  operatorów systemu kaucyjnego (pkt 11.8) wymagają 12 tygodni kopii na maszynie. Odrzucone
+  transakcje i worki też 84 dni (inne odrzucone wiadomości 30 dni). Eksport: `archive-export`.
 - **Ponawianie.** Brak połączenia → pauza z rosnącym odstępem (do 60 s). 408/429/5xx
   i zegar → ponowienie tej jednej wiadomości. Inne 4xx → wiadomość odrzucona
   („dead letter”), nie blokuje reszty, błąd idzie do logów panelu. Po 5xx nowy klucz
@@ -51,7 +55,8 @@ zaszyfrowane DPAPI (zakres komputera).
 python -m revend_sync enroll --file enrollment.json [--db-password ...]   # instalator
 python -m revend_sync run            # usługa
 python -m revend_sync check          # baza maszyny + połączenie z API
-python -m revend_sync status         # kolejka i odrzucone wiadomości
+python -m revend_sync status         # kolejka, archiwum i odrzucone wiadomości
+python -m revend_sync archive-export [--since 2026-10-01] [--out plik.jsonl]   # wysłane transakcje i worki
 python -m revend_sync requeue-dead   # wyślij odrzucone ponownie (po poprawce na serwerze)
 ```
 
