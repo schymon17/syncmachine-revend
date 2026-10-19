@@ -66,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("status", help="show the queue and recent rejections")
     commands.add_parser("requeue-dead", help="send rejected messages again (after a server-side fix)")
 
+    export = commands.add_parser(
+        "archive-export", help="write sent transactions and seals (kept 12 weeks) as JSON lines"
+    )
+    export.add_argument("--since", help="only messages sent on or after this date (YYYY-MM-DD)")
+    export.add_argument("--out", type=Path, help="output file (default: standard output)")
+
     args = parser.parse_args(argv)
     home = args.home or config_module.home()
 
@@ -80,13 +86,18 @@ def main(argv: list[str] | None = None) -> int:
         return _service(args.install_root, home)
     if args.command == "run":
         return _run(home)
-    if args.command in ("status", "requeue-dead", "check") and not (home / "config.json").exists():
+    if (
+        args.command in ("status", "requeue-dead", "check", "archive-export")
+        and not (home / "config.json").exists()
+    ):
         print(f"Agent is not installed here (no {home / 'config.json'}).", file=sys.stderr)
         return 1
     if args.command == "check":
         return _check(home)
     if args.command == "status":
         return _status(home)
+    if args.command == "archive-export":
+        return _archive_export(home, args.since, args.out)
     if args.command == "requeue-dead":
         count = Store(home / "agent.db").requeue_dead()
         print(f"{count} message(s) queued again")
@@ -232,8 +243,32 @@ def _status(home: Path) -> int:
         print(f"Oldest unsent message: {int(time.time() - oldest)} s ago")
     last = store.get("last_sent_at")
     print("Last delivery: " + (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "never"))
+    archive = store.archive_stats()
+    if archive["messages"]:
+        oldest_sent = time.strftime("%Y-%m-%d", time.localtime(archive["oldest_sent_at"]))
+        print(
+            f"Archive: {archive['messages']} sent message(s) since {oldest_sent}, "
+            f"{archive['bytes'] / 1048576:.1f} MB"
+        )
     for dead in store.dead_letters(10):
         print(f"  rejected #{dead['id']} {dead['kind']}: {str(dead['last_error'])[:200]}")
+    return 0
+
+
+def _archive_export(home: Path, since: str | None, out: Path | None) -> int:
+    start = time.mktime(time.strptime(since, "%Y-%m-%d")) if since else 0.0
+    store = Store(home / "agent.db")
+    handle = out.open("w", encoding="utf-8") if out else sys.stdout
+    count = 0
+    try:
+        for message in store.archived(start):
+            handle.write(json.dumps(message, ensure_ascii=False) + "\n")
+            count += 1
+    finally:
+        if out:
+            handle.close()
+        store.close()
+    print(f"{count} message(s) exported", file=sys.stderr)
     return 0
 
 
