@@ -36,6 +36,7 @@ kupony i aktualizacje agenta przychodzą.
   maszyna nigdy nie zostaje z pustą tabelą `barcode`. Odpowiedź dużo mniejsza niż obecny
   katalog nie jest importowana.
 - **Kupony** – pula `printer_barcode` uzupełniana do 50, bez numerów użytych lub drukowanych.
+- **Polecenia z panelu** co 60 s (`POST {agentBaseUrl}/commands`): agent zgłasza pulę kuponów (liczba i 5 najbliższych kodów) i odbiera polecenia; wynik odsyła na `commands/{id}/result`. Jedyne polecenie, `clear_coupon_pool` (przycisk „Usuń stare kody kuponów” w zakładce Serwis maszyny), usuwa całą pulę `printer_barcode`, zeruje `command.printer_barcode` i od razu pobiera nowe kody – na maszynie skopiowanej z innej zostają kody tamtej maszyny, które Kaucja odrzuca jako wygasłe.
 - **Reklamy** co 5 min (`/adverts`): pliki do folderów www maszyny (domyślnie
   `C:\phpStudy\PHPTutorial\WWW\downadpic\img` i `...\advideo\video`, przy instalacji
   przejmowane z konfiguracji agenta PHP), ścieżki do `machineinformation.p_down0–4`

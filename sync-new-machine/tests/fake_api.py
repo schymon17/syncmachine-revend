@@ -33,6 +33,7 @@ class FakeApi:
         self.reject_seals: set[str] = set()
         self.eans: list[dict[str, Any]] = []
         self.coupons: list[str] = []
+        self.commands: list[dict[str, Any]] = []
         self.release: dict[str, Any] | None = None
         self.adverts: dict[str, Any] = {}
         self.files: dict[str, bytes] = {}
@@ -149,6 +150,11 @@ class FakeApi:
             return 200, self.adverts
         if endpoint == "register":
             return 200, {"data": {"attributes": {"registered": True, "integration": "kaucja"}}}
+        if endpoint == "agent/commands":
+            with self.lock:
+                self.received.setdefault(endpoint, []).append(payload)
+                queued, self.commands = self.commands, []
+            return 200, {"data": {"commands": queued}}
         if endpoint == "agent/release":
             newer = self.release is not None and self.release["version"] != payload["currentVersion"]
             return 200, {"data": {"updateAvailable": newer, "release": self.release if newer else None}}

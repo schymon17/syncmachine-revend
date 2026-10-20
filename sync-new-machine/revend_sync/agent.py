@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymysql
 
-from . import __version__, adverts, catalog, logs, updates
+from . import __version__, adverts, catalog, commands, logs, updates
 from .api import ApiError, Client, encode_body
 from .collectors import BinCollector, StatusCollector, TransactionCollector
 from .config import Config
@@ -79,6 +79,9 @@ class Agent:
             Task("logs", 30, lambda: logs.queue_upload(store, config.machine_id, config.url("logs"))),
             Task("heartbeat", 300, self.heartbeat),
             Task("updates", 6 * 3600, lambda: updates.check(self.client, config, self.data_dir / "updates")),
+            Task(
+                "commands", 60, lambda: commands.poll(self.client, self.db, config), next_at=20, needs_db=True
+            ),
             Task("housekeeping", 3600, store.prune),
         ]
         if config.eans_enabled:
