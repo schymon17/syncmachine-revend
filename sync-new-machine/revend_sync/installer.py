@@ -101,7 +101,13 @@ def install(
 
     db = _db_settings(options, old)
     if not db.password and old is None and options.db_password is None:
-        db = replace(db, password=ask_password("Hasło do bazy maszyny (MySQL): "))
+        # Bez starego agenta haslo podaje panel (REVEND_AGENT_DEFAULT_DB_PASSWORD);
+        # pytamy tylko, gdy go tam nie ma. Nigdy nie jest w tym repo.
+        panel_password = enrollment.get("dbPassword")
+        if isinstance(panel_password, str) and panel_password:
+            db = replace(db, password=panel_password)
+        else:
+            db = replace(db, password=ask_password("Hasło do bazy maszyny (MySQL): "))
     machine_db = MachineDb(db)
     try:
         problems = machine_db.check_schema()

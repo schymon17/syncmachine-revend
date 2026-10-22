@@ -161,3 +161,47 @@ def test_install_takes_the_machine_over_from_the_old_agent(machine, tmp_path):
         ]["n"]
         == 0
     )
+
+
+@requires_mysql
+def test_without_the_old_agent_the_db_password_comes_from_the_panel(machine, tmp_path):
+    db, _ = machine
+    settings = db._settings
+    enrollment = tmp_path / "enrollment.json"
+    enrollment.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "machineId": MACHINE_ID,
+                    "integration": "kaucja",
+                    "keyId": KEY_ID,
+                    "secret": SECRET,
+                    "apiBaseUrl": "https://panel.example/api/revend/machine/v2",
+                    "agentBaseUrl": "https://panel.example/api/revend/agent",
+                    "dbPassword": settings.password,
+                }
+            }
+        )
+    )
+
+    def never_asked(_prompt):
+        raise AssertionError("the installer asked for the database password")
+
+    install(
+        InstallOptions(
+            enrollment_file=enrollment,
+            legacy_dir=tmp_path / "no-legacy",
+            db_host=settings.host,
+            db_port=settings.port,
+            db_name=settings.database,
+            db_user=settings.user,
+            install_root=tmp_path / "Sync",
+            data_dir=tmp_path / "data",
+            register_task=False,
+            stop_legacy=False,
+        ),
+        say=lambda _: None,
+        ask_password=never_asked,
+    )
+
+    assert config.load(tmp_path / "data").db.password == settings.password

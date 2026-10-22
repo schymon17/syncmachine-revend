@@ -14,13 +14,14 @@ from . import catalog
 from .api import ApiError, Client, encode_body
 from .config import Config
 from .machine_db import MachineDb
+from .store import Store
 
 log = logging.getLogger(__name__)
 
 SAMPLE_SIZE = 5
 
 
-def poll(client: Client, db: MachineDb, config: Config) -> int:
+def poll(client: Client, db: MachineDb, config: Config, store: Store) -> int:
     """Report the coupon pool, run queued commands. Returns how many ran."""
     response = client.post(
         config.agent_url("commands"),
@@ -31,6 +32,7 @@ def poll(client: Client, db: MachineDb, config: Config) -> int:
 
     handlers: dict[str, Callable[[], dict[str, Any]]] = {
         "clear_coupon_pool": lambda: clear_coupon_pool(client, db, config),
+        "refresh_eans": lambda: refresh_eans(client, db, store, config),
     }
     ran = 0
     for command in commands if isinstance(commands, list) else []:
@@ -64,6 +66,15 @@ def clear_coupon_pool(client: Client, db: MachineDb, config: Config) -> dict[str
     db.execute("UPDATE command SET printer_barcode = '0'")
     added = catalog.top_up_coupons(client, db, config)
     return {"removed": removed, "added": added, "count": coupon_pool(db)["count"]}
+
+
+def refresh_eans(client: Client, db: MachineDb, store: Store, config: Config) -> dict[str, Any]:
+    """Fetch the full EAN catalogue now instead of at the next 6-hourly sync."""
+    if not config.eans_enabled:
+        raise RuntimeError("EAN sync is disabled on this machine (eansEnabled=false)")
+    if not catalog.sync_eans(client, db, store, config, force=True):
+        raise RuntimeError("EAN catalogue was not imported (empty or much smaller list); the current one stays")
+    return {"count": int(db.query("SELECT COUNT(*) AS n FROM barcode")[0]["n"])}
 
 
 def _report(

@@ -37,12 +37,14 @@ RETIRED = "barcode_revend_old"
 MIN_KEEP_RATIO = 0.5
 
 
-def sync_eans(client: Client, db: MachineDb, store: Store, config: Config) -> bool:
+def sync_eans(client: Client, db: MachineDb, store: Store, config: Config, *, force: bool = False) -> bool:
     """Replace the machine's ``barcode`` table with the ReVend catalogue, atomically.
 
     The new catalogue is loaded into a staging copy of the table and swapped
     in with one RENAME TABLE: the machine sees the old catalogue or the new
     one, never an empty or half-filled table (the old agent truncated first).
+    ``force`` (the panel's refresh_eans command) imports even an unchanged
+    catalogue, e.g. when the table on the machine was edited by hand.
     """
     response = client.post(config.url("eans"), encode_body({"machineId": config.machine_id}))
     data = response.data.get("data", {}) if isinstance(response.data, dict) else {}
@@ -52,7 +54,7 @@ def sync_eans(client: Client, db: MachineDb, store: Store, config: Config) -> bo
         return False
 
     digest = hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
-    if store.get("eans_hash") == digest:
+    if not force and store.get("eans_hash") == digest:
         return False
 
     columns = [c for c in BARCODE_COLUMNS if c in db.table_columns("barcode")]

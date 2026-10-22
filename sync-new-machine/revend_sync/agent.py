@@ -80,7 +80,7 @@ class Agent:
             Task("heartbeat", 300, self.heartbeat),
             Task("updates", 6 * 3600, lambda: updates.check(self.client, config, self.data_dir / "updates")),
             Task(
-                "commands", 60, lambda: commands.poll(self.client, self.db, config), next_at=20, needs_db=True
+                "commands", 60, lambda: commands.poll(self.client, self.db, config, store), next_at=20, needs_db=True
             ),
             Task("housekeeping", 3600, store.prune),
         ]
