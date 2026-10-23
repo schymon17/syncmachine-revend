@@ -139,6 +139,53 @@ def test_bags_are_queued_one_per_seal_and_never_twice(machine, store, api):
     assert store.stats()["pending"] == 2
 
 
+def test_a_bag_behind_the_cursor_is_sent_by_the_sweep(machine, store, api):
+    """A machine database copied from another machine: the cursor is past its bags."""
+    db, _ = machine
+    now = int(time.time())
+    db.execute(
+        "INSERT INTO empty_record (dateline, bin_type, barcode) VALUES (%s, 'left', 'HISTORY')", (now - 3600,)
+    )
+    bins = BinCollector(db, store, MACHINE_ID, api.base + "/bins")
+    bins.initialise()
+    store.set(BinCollector.STATE_LAST, 1000)
+    db.execute("INSERT INTO empty_record (dateline, bin_type, barcode) VALUES (%s, 'left', 'MISSED')", (now,))
+
+    assert bins.poll() == 0
+    assert store.get(BinCollector.STATE_LAST) < 1000  # moved back to the table
+    assert bins.sweep() == 1  # history before the agent is not resent
+    assert bins.sweep() == 0
+    assert bins.poll() == 0
+    assert store.stats()["pending"] == 1
+
+
+def test_a_bag_sent_by_poll_is_not_sent_again_by_the_sweep(machine, store, api):
+    db, _ = machine
+    bins = BinCollector(db, store, MACHINE_ID, api.base + "/bins")
+    bins.initialise()
+    db.execute(
+        "INSERT INTO empty_record (dateline, bin_type, barcode) VALUES (%s, 'right', 'S1')",
+        (int(time.time()),),
+    )
+    assert bins.poll() == 1
+    assert bins.sweep() == 0
+    assert store.stats()["pending"] == 1
+
+
+def test_an_agent_from_before_the_sweep_catches_up_on_the_last_week(machine, store, api):
+    db, _ = machine
+    now = int(time.time())
+    db.execute(
+        "INSERT INTO empty_record (dateline, bin_type, barcode) VALUES (%s, 'left', 'OLD'), (%s, 'left', 'RECENT')",
+        (now - 8 * 86400, now - 2 * 86400),
+    )
+    store.set(BinCollector.STATE_LAST, 1000)  # set by an older agent, no bins_since
+    bins = BinCollector(db, store, MACHINE_ID, api.base + "/bins")
+    bins.initialise()
+    assert bins.sweep() == 1
+    assert store.stats()["pending"] == 1
+
+
 def test_status_is_queued_on_change_only(machine, store, api):
     db, _ = machine
     db.execute(

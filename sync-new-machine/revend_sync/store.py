@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS sent_transactions (
     item_count INTEGER NOT NULL,
     queued_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sent_bins (
+    seal TEXT NOT NULL,
+    dateline INTEGER NOT NULL,
+    queued_at REAL NOT NULL,
+    PRIMARY KEY (seal, dateline)
+);
 CREATE TABLE IF NOT EXISTS sent_archive (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
@@ -286,6 +292,22 @@ class Store:
             (coupon, fingerprint, item_count, time.time()),
         )
 
+    # --- sent bags ----------------------------------------------------------
+
+    def sent_bin(self, seal: str, dateline: int, *, db: sqlite3.Connection | None = None) -> bool:
+        row = (
+            (db or self._db)
+            .execute("SELECT 1 FROM sent_bins WHERE seal = ? AND dateline = ?", (seal, dateline))
+            .fetchone()
+        )
+        return row is not None
+
+    def remember_bin(self, seal: str, dateline: int, *, db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT OR IGNORE INTO sent_bins (seal, dateline, queued_at) VALUES (?, ?, ?)",
+            (seal, dateline, time.time()),
+        )
+
     # --- logs -------------------------------------------------------------
 
     def buffer_log(self, logged_at: str, level: str, message: str, context: dict[str, Any] | None) -> None:
@@ -326,6 +348,7 @@ class Store:
             )
             db.execute("DELETE FROM sent_archive WHERE sent_at < ?", (now - ARCHIVE_RETENTION_SECONDS,))
             db.execute("DELETE FROM sent_transactions WHERE queued_at < ?", (now - SENT_RETENTION_SECONDS,))
+            db.execute("DELETE FROM sent_bins WHERE queued_at < ?", (now - SENT_RETENTION_SECONDS,))
             db.execute(
                 "DELETE FROM log_buffer WHERE id <= (SELECT MAX(id) FROM log_buffer) - ?", (LOG_BUFFER_MAX,)
             )

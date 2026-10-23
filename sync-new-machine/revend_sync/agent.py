@@ -81,6 +81,7 @@ class Agent:
             ),
             Task("transactions-sweep", 300, self.transactions.sweep, needs_db=True),
             Task("bins", 5, self.bins.poll, needs_db=True),
+            Task("bins-sweep", 60, self.bins.sweep, next_at=15, needs_db=True),
             Task("status", 60, self.status.poll, needs_db=True),
             Task("send", 1, self.sender.run_once),
             Task("logs", 30, lambda: logs.queue_upload(store, config.machine_id, config.url("logs"))),
