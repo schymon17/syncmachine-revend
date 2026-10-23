@@ -67,6 +67,44 @@ def test_a_transaction_without_a_coupon_until_the_end_is_not_skipped(machine, st
     assert collector.poll() == 1
 
 
+def test_a_finished_transaction_waiting_for_its_coupon_holds_the_cursor(machine, store, api):
+    """Machines that write print_barcode a moment after transactiondone - without holding the
+    cursor the transaction waited for the five-minute sweep (up to 300 s on RVM_4000_C4P)."""
+    db, _ = machine
+    collector = TransactionCollector(db, store, MACHINE_ID, api.base + "/trans")
+    collector.initialise()
+    now = int(time.time())
+    insert_item(db, None, now, done=2)
+    insert_item(db, None, now + 1, done=2)
+    assert collector.poll() == 0
+
+    db.execute("UPDATE user_transaction SET print_barcode = 'LATE-COUPON' WHERE print_barcode IS NULL")
+    assert collector.poll() == 1
+
+
+def test_a_finished_row_that_never_gets_a_coupon_stops_holding_the_cursor(machine, store, api):
+    db, _ = machine
+    collector = TransactionCollector(db, store, MACHINE_ID, api.base + "/trans")
+    collector.initialise()
+    insert_item(db, None, int(time.time()) - TransactionCollector.COUPON_WAIT_SECONDS - 60, done=2)
+    insert_item(db, "NON", int(time.time()), done=2)  # no coupon by design (donation)
+    insert_item(db, "FRESH", int(time.time()), done=2)
+    assert collector.poll() == 1
+    assert store.get(TransactionCollector.STATE_LOW) > 3
+
+
+def test_the_recent_sweep_catches_a_row_committed_behind_the_cursor(machine, store, api):
+    db, _ = machine
+    collector = TransactionCollector(db, store, MACHINE_ID, api.base + "/trans")
+    collector.initialise()
+    now = int(time.time())
+    insert_item(db, "FIRST", now, done=2, id=10)
+    assert collector.poll() == 1
+    insert_item(db, "BEHIND", now + 1, done=2, id=5)  # a lower id committed after the cursor moved on
+    assert collector.poll() == 0
+    assert collector.sweep(TransactionCollector.RECENT_ROWS) == 1
+
+
 def test_history_before_the_agent_is_never_sent(machine, store, api):
     db, _ = machine
     insert_item(db, "HISTORY", int(time.time()) - 3600, done=2)

@@ -28,17 +28,23 @@ class TransactionCollector:
     ``poll`` reads by primary key from the oldest row of a transaction still
     in progress (``trans_low_id``), so a transaction is picked up when its rows
     flip to finished. A transaction left unfinished for ``ABANDON_SECONDS``
-    stops holding the cursor back. ``sweep`` re-reads the newest rows now and
-    then and catches anything finished after that; local fingerprints make
-    sure unchanged transactions are not queued again.
+    stops holding the cursor back. A finished row still without a coupon holds
+    it too, for ``COUPON_WAIT_SECONDS``: some machines write ``print_barcode``
+    a moment after ``transactiondone``, and moving past such a row left the
+    transaction to the five-minute sweep. ``sweep`` re-reads the newest rows
+    and catches anything finished after that (``RECENT_ROWS`` every few
+    seconds, ``SWEEP_ROWS`` now and then); local fingerprints make sure
+    unchanged transactions are not queued again.
     """
 
     STATE_LOW = "trans_low_id"
     # The first id the agent is responsible for; nothing below it is ever sent.
     STATE_START = "trans_start_id"
     POLL_LIMIT = 5000
+    RECENT_ROWS = 500
     SWEEP_ROWS = 20000
     ABANDON_SECONDS = 6 * 3600
+    COUPON_WAIT_SECONDS = 15 * 60
 
     def __init__(
         self, db: MachineDb, store: Store, machine_id: str, url: str, now: Callable[[], float] = time.time
@@ -69,12 +75,12 @@ class TransactionCollector:
         )
         return self._process(rows, low=low)
 
-    def sweep(self) -> int:
+    def sweep(self, limit: int | None = None) -> int:
         top = int(self._db.query("SELECT COALESCE(MAX(id), 0) AS max_id FROM user_transaction")[0]["max_id"])
         start = int(self._store.get(self.STATE_START, 0))
         rows = self._db.query(
             f"SELECT {self._db.transaction_select()} FROM user_transaction WHERE id >= %s ORDER BY id",
-            (max(top - self.SWEEP_ROWS + 1, start),),
+            (max(top - (limit or self.SWEEP_ROWS) + 1, start),),
         )
         return self._process(rows, low=None)
 
@@ -82,15 +88,19 @@ class TransactionCollector:
         by_coupon: dict[str, list[dict[str, Any]]] = defaultdict(list)
         in_progress_ids = []
         abandon_before = self._now() - self.ABANDON_SECONDS
+        coupon_wait_before = self._now() - self.COUPON_WAIT_SECONDS
 
         for row in rows:
+            dateline = builders.to_int(row.get("dateline"), 0)
             if not builders.is_finished(row):
-                if builders.to_int(row.get("dateline"), 0) >= abandon_before:
+                if dateline >= abandon_before:
                     in_progress_ids.append(int(row["id"]))
                 continue
             coupon = builders.coupon_of(row)
             if coupon is not None:
                 by_coupon[coupon].append(row)
+            elif str(row.get("print_barcode") or "").strip() == "" and dateline >= coupon_wait_before:
+                in_progress_ids.append(int(row["id"]))
 
         # A coupon still having unfinished rows in this read is not done yet.
         unfinished_coupons = {builders.coupon_of(r) for r in rows if not builders.is_finished(r)}
