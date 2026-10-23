@@ -172,25 +172,43 @@ class BinCollector:
     One per request on purpose: the API rejects a whole /bins batch when a
     single seal belongs to another machine, which would also drop the good
     seals sent with it.
+
+    ``poll`` reads new rows by id. ``sweep`` re-reads the bags of the last
+    ``SWEEP_SECONDS`` by date and queues any seal not sent yet, so a bag is
+    sent even when the id cursor is past it (a machine database copied from
+    another machine, restored or reset). The API takes a repeated own seal
+    as a duplicate, so a seal sent twice does no harm.
     """
 
     STATE_LAST = "bins_last_id"
+    # Bags sealed before this moment are left to ``poll`` (history is not resent).
+    STATE_SINCE = "bins_since"
     POLL_LIMIT = 200
+    SWEEP_SECONDS = 7 * 86400
+    SWEEP_LIMIT = 500
 
-    def __init__(self, db: MachineDb, store: Store, machine_id: str, url: str):
+    def __init__(
+        self, db: MachineDb, store: Store, machine_id: str, url: str, now: Callable[[], float] = time.time
+    ):
         self._db = db
         self._store = store
         self._machine_id = machine_id
         self._url = url
+        self._now = now
 
     def initialise(self, from_id: int | None = None) -> None:
         if self._store.get(self.STATE_LAST) is not None:
+            if self._store.get(self.STATE_SINCE) is None:
+                # Agent from before the sweep: catch up on the last week once.
+                self._store.set(self.STATE_SINCE, int(self._now()) - self.SWEEP_SECONDS)
             return
         if from_id is None:
             last = int(self._db.query("SELECT COALESCE(MAX(id), 0) AS max_id FROM empty_record")[0]["max_id"])
         else:
             last = int(from_id) - 1
-        self._store.set(self.STATE_LAST, last)
+        with self._store.transaction() as db:
+            self._store.set(self.STATE_LAST, last, db=db)
+            self._store.set(self.STATE_SINCE, int(self._now()), db=db)
         log.info("Bags start after id %s", last)
 
     def poll(self) -> int:
@@ -200,25 +218,57 @@ class BinCollector:
             (last, self.POLL_LIMIT),
         )
         if not rows:
+            top = int(self._db.query("SELECT COALESCE(MAX(id), 0) AS max_id FROM empty_record")[0]["max_id"])
+            if top < last:
+                # The table was replaced or emptied: new bags would get ids
+                # the cursor already passed.
+                log.warning("Bag cursor %s is past the newest bag id %s, moved back", last, top)
+                self._store.set(self.STATE_LAST, top)
             return 0
 
-        queued = 0
         with self._store.transaction() as db:
-            for row in rows:
-                built = builders.build_bin(self._machine_id, row)
-                for problem in built.problems:
-                    log.warning(problem)
-                if built.value is not None:
-                    self._store.enqueue("bins", self._url, encode_body(built.value), db=db)
-                    queued += 1
+            queued = self._queue(rows, db)
             self._store.set(self.STATE_LAST, int(rows[-1]["id"]), db=db)
 
         if queued:
-            log.info(
-                "Queued %s sealed bag(s)",
-                queued,
-                extra={"context": {"seals": [str(r.get("barcode")) for r in rows][:20]}},
+            log.info("Queued %s sealed bag(s)", len(queued), extra={"context": {"seals": queued[:20]}})
+        return len(queued)
+
+    def sweep(self) -> int:
+        since = max(int(self._store.get(self.STATE_SINCE, 0)), int(self._now()) - self.SWEEP_SECONDS)
+        rows = self._db.query(
+            "SELECT id, dateline, bin_type, barcode FROM empty_record WHERE dateline >= %s ORDER BY id DESC LIMIT %s",
+            (since, self.SWEEP_LIMIT),
+        )
+        if not rows:
+            return 0
+
+        with self._store.transaction() as db:
+            queued = self._queue(list(reversed(rows)), db)
+
+        if queued:
+            log.warning(
+                "Queued %s sealed bag(s) the id cursor missed",
+                len(queued),
+                extra={"context": {"seals": queued[:20], "cursor": self._store.get(self.STATE_LAST)}},
             )
+        return len(queued)
+
+    def _queue(self, rows: list[dict[str, Any]], db: Any) -> list[str]:
+        """Queue the rows whose seal is not sent yet; returns the queued seals."""
+        queued = []
+        for row in rows:
+            seal = str(row.get("barcode") or "").strip()
+            dateline = builders.to_int(row.get("dateline"), 0)
+            if self._store.sent_bin(seal, dateline, db=db):
+                continue
+            built = builders.build_bin(self._machine_id, row)
+            for problem in built.problems:
+                log.warning(problem)
+            if built.value is not None:
+                self._store.enqueue("bins", self._url, encode_body(built.value), db=db)
+                queued.append(seal)
+            self._store.remember_bin(seal, dateline, db=db)
         return queued
 
 
