@@ -72,6 +72,13 @@ class Agent:
         self.tasks = [
             Task("prepare", 30, self._prepare, needs_db=True),
             Task("transactions", 2, self.transactions.poll, needs_db=True),
+            Task(
+                "transactions-recent",
+                10,
+                lambda: self.transactions.sweep(TransactionCollector.RECENT_ROWS),
+                next_at=5,
+                needs_db=True,
+            ),
             Task("transactions-sweep", 300, self.transactions.sweep, needs_db=True),
             Task("bins", 5, self.bins.poll, needs_db=True),
             Task("status", 60, self.status.poll, needs_db=True),
