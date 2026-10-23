@@ -5,7 +5,7 @@ import logging
 
 from revend_sync import logs
 from revend_sync.api import encode_body
-from revend_sync.sender import Sender
+from revend_sync.sender import OFFLINE_MAX_SECONDS, Sender
 
 from .fake_api import MACHINE_ID
 
@@ -50,6 +50,20 @@ def test_offline_keeps_everything_and_sends_it_when_back(api, client, store):
     clock.now += 120
     assert sender.run_once() == 1
     assert sender.online is True
+
+
+def test_a_long_outage_is_probed_at_most_every_15_seconds(client, store):
+    """After the connection returns, queued transactions go out within ~15 s, not up to 72 s."""
+    clock = Clock()
+    store.enqueue("heartbeat", "http://127.0.0.1:9/api/revend/machine/v2/heartbeat", heartbeat_body())
+    sender = Sender(store, client, now=clock)
+
+    for _ in range(12):  # well past the 60 s step of BACKOFF
+        store._db.execute("UPDATE outbox SET next_attempt_at = 0")
+        sender.run_once()
+        pause = sender._paused_until - clock.now
+        assert 0 < pause <= OFFLINE_MAX_SECONDS
+        clock.now = sender._paused_until
 
 
 def test_a_rejected_message_becomes_a_dead_letter_and_does_not_block_others(api, client, store, caplog):

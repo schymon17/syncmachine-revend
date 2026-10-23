@@ -16,6 +16,10 @@ log = logging.getLogger(__name__)
 # Longer outages keep the 60 s ceiling so a machine catches up within a
 # minute of the connection returning.
 BACKOFF = [1, 2, 4, 8, 16, 30, 60]
+# While the API is unreachable the agent probes it at most this far apart:
+# one small request per 15 s costs nothing, and queued transactions go out
+# within about 15 s of the connection returning instead of up to 72 s.
+OFFLINE_MAX_SECONDS = 15
 
 
 def backoff(attempt: int, rng: Callable[[], float] = random.random) -> float:
@@ -108,7 +112,7 @@ class Sender:
         )
 
     def _go_offline(self, error: ApiError) -> None:
-        delay = backoff(self._offline_attempts)
+        delay = min(backoff(self._offline_attempts), OFFLINE_MAX_SECONDS)
         self._offline_attempts += 1
         self._paused_until = self._now() + delay
         if self.online is not False:
