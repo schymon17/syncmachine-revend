@@ -2,7 +2,7 @@
 
 The agent only reads the machine's own tables, except for the product
 catalogue (``barcode``) and the coupon pool (``printer_barcode``), which it
-fills. It installs no triggers: a broken trigger would make the machine's
+fills, and ``machineinformation`` (advert paths and the machine ID). It installs no triggers: a broken trigger would make the machine's
 own INSERT/UPDATE fail, and polling by primary key is cheap and fast enough.
 """
 
@@ -126,6 +126,36 @@ class MachineDb:
             if missing:
                 problems.append(f"table {table} lacks columns: {', '.join(missing)}")
         return problems
+
+    def align_machine_id(self, machine_id: str) -> str | None:
+        """Give the machine's own ``machineinformation`` row the ReVend machine ID.
+
+        The machine software sends ``machineinformation.mid`` to ``/seal/check``.
+        Machines installed from a copied database kept the source machine's ID
+        there and had their seals checked against that machine's operator.
+        Only a table with exactly one row is changed. Returns the replaced ID.
+        """
+        if "mid" not in self.table_columns("machineinformation"):
+            return None
+        mids = [row["mid"] for row in self.query("SELECT mid FROM machineinformation")]
+        if machine_id in mids:
+            return None
+        if len(mids) != 1:
+            log.warning(
+                "machineinformation has no row for %s; the machine may check seals under another ID",
+                machine_id,
+                extra={"context": {"mids": [str(mid) for mid in mids[:5]], "rows": len(mids)}},
+            )
+            return None
+        self.execute("UPDATE machineinformation SET mid = %s", (machine_id,))
+        previous = "" if mids[0] is None else str(mids[0])
+        log.warning(
+            "machineinformation had machine ID %s; set it to %s",
+            previous,
+            machine_id,
+            extra={"context": {"previous": previous}},
+        )
+        return previous
 
     def transaction_select(self) -> str:
         columns = REQUIRED_COLUMNS["user_transaction"] | {

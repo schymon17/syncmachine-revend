@@ -287,3 +287,26 @@ def test_end_to_end_offline_then_online(machine, store, api, tmp_path):
     heartbeat = api.got("heartbeat")[-1]
     assert heartbeat["agent"]["machineDbConnected"] is True
     assert store.stats()["pending"] == 0
+
+
+def test_a_copied_machine_id_is_replaced_by_the_revend_one(machine, caplog):
+    """The machine software checks seals under machineinformation.mid."""
+    db, _ = machine
+    db.execute("INSERT INTO machineinformation (mid) VALUES ('RVM_500_8590718325')")
+
+    assert db.align_machine_id(MACHINE_ID) == "RVM_500_8590718325"
+    assert db.query("SELECT mid FROM machineinformation") == [{"mid": MACHINE_ID}]
+    assert "had machine ID RVM_500_8590718325" in caplog.text
+
+    caplog.clear()
+    assert db.align_machine_id(MACHINE_ID) is None
+    assert caplog.text == ""
+
+
+def test_the_machine_id_is_left_alone_when_the_row_is_ambiguous(machine, caplog):
+    db, _ = machine
+    db.execute("INSERT INTO machineinformation (mid) VALUES ('A'), ('B')")
+
+    assert db.align_machine_id(MACHINE_ID) is None
+    assert sorted(row["mid"] for row in db.query("SELECT mid FROM machineinformation")) == ["A", "B"]
+    assert "may check seals under another ID" in caplog.text
