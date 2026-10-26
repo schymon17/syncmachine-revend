@@ -138,7 +138,7 @@ class FakeApi:
             seal = payload["data"]["empty_records"][0]["barcode"]
             if seal in self.reject_seals:
                 return 409, {"error": {"code": "seal_already_used"}, "sealNumber": seal}
-            if payload["data"]["empty_records"][0]["bin_type"] not in ("pet", "can"):
+            if payload["data"]["empty_records"][0]["bin_type"] not in ("pet", "can", "glass"):
                 return 422, {"message": "bin_type"}
         if endpoint == "eans":
             return 200, {"data": {"attributes": self.eans}}
