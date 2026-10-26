@@ -62,7 +62,7 @@ def test_a_long_outage_is_probed_at_most_every_15_seconds(client, store):
         store._db.execute("UPDATE outbox SET next_attempt_at = 0")
         sender.run_once()
         pause = sender._paused_until - clock.now
-        assert 0 < pause <= OFFLINE_MAX_SECONDS
+        assert 0 < pause <= OFFLINE_MAX_SECONDS + 1e-6  # float sum, not exactly 15
         clock.now = sender._paused_until
 
 
@@ -141,3 +141,27 @@ def test_a_rejected_log_upload_does_not_create_another_upload(api, client, store
 
     assert logs.queue_upload(store, MACHINE_ID, api.base + "/api/revend/machine/v2/logs") == 0
     logging.getLogger().handlers.clear()
+
+
+def test_a_rate_limit_pauses_the_whole_sender_and_logs_once(api, client, store, caplog):
+    """429 is per key: the other messages would get it too, so none of them is tried."""
+    clock = Clock()
+    url = api.base + "/api/revend/machine/v2/heartbeat"
+    for _ in range(5):
+        store.enqueue("heartbeat", url, heartbeat_body())
+    sender = Sender(store, client, now=clock)
+
+    api.fail_with = 429
+    with caplog.at_level(logging.WARNING):
+        assert sender.run_once() == 0
+        assert sender.run_once() == 0  # still paused
+
+    attempts = [r[0] for r in store._db.execute("SELECT attempts FROM outbox ORDER BY id")]
+    assert attempts == [1, 0, 0, 0, 0]
+    assert caplog.text.count("rate limit") == 1
+    assert sender._paused_until > clock.now
+
+    api.fail_with = None
+    store._db.execute("UPDATE outbox SET next_attempt_at = 0")
+    clock.now = sender._paused_until
+    assert sender.run_once() == 5

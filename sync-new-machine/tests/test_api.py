@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from revend_sync.api import ApiError, Client, encode_body, sign
@@ -65,3 +67,21 @@ def test_http_errors_are_classified(api, client, status, retryable):
     with pytest.raises(ApiError) as caught:
         client.post(api.base + "/api/revend/machine/v2/status", encode_body({"machineId": MACHINE_ID}))
     assert caught.value.retryable is retryable
+
+
+def test_a_failure_whose_text_differs_only_by_an_object_address_is_logged_once(caplog):
+    from revend_sync.agent import Agent, Task
+
+    task = Task("commands", 60, lambda: None)
+    with caplog.at_level(logging.WARNING):
+        for address in ("0x000001F2A3B4C5D0", "0x000001F2A3B4D1E8", "0x7f3a2b1c0d9e"):
+            error = ApiError(
+                "ConnectionError: HTTPSConnectionPool(host='panel.revend.pl', port=443): Max retries exceeded "
+                f"(Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at {address}>: "
+                "Failed to establish a new connection'))",
+                status=None,
+                retryable=True,
+            )
+            Agent._report(None, task, error, level=logging.WARNING)
+
+    assert caplog.text.count("Task commands failed") == 1

@@ -33,7 +33,9 @@ class Sender:
     - 2xx: delivered, removed from the outbox.
     - Network error: the whole sender pauses (no point hammering every
       message while offline); messages keep their place.
-    - Retryable HTTP error (408/429/5xx, stale clock, request in progress):
+    - 429: the limit is per key, so every other message would get it too;
+      the whole sender pauses until the limit resets.
+    - Other retryable HTTP error (408/5xx, stale clock, request in progress):
       that message waits with backoff, others continue.
     - Any other 4xx: the API rejected the data; the message becomes a dead
       letter so it cannot block the rest, and an error is logged.
@@ -63,6 +65,8 @@ class Sender:
                     self._store.retry_later(message.id, 0, str(error))
                     return delivered
                 self._handle_http_error(message.id, message.kind, message.attempts, error)
+                if error.status == 429:
+                    return delivered
                 continue
 
             self._store.delivered(message.id)
@@ -83,6 +87,9 @@ class Sender:
             # deduplicated by their natural keys, so this is safe.
             new_key = error.status is not None and error.status >= 500
             self._store.retry_later(message_id, delay, str(error), new_key=new_key)
+            if error.status == 429:
+                self._rate_limited(delay)
+                return
             log.warning(
                 "Send failed, will retry",
                 extra={
@@ -110,6 +117,12 @@ class Sender:
                 },
             },
         )
+
+    def _rate_limited(self, delay: float) -> None:
+        # Logged once per pause, not once per message.
+        if self._now() >= self._paused_until:
+            log.warning("API rate limit reached, pausing sends", extra={"context": {"seconds": round(delay)}})
+        self._paused_until = self._now() + delay
 
     def _go_offline(self, error: ApiError) -> None:
         delay = min(backoff(self._offline_attempts), OFFLINE_MAX_SECONDS)
