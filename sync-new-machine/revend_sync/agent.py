@@ -195,6 +195,10 @@ class Agent:
             raise RuntimeError("machine database does not fit: " + "; ".join(problems))
         self.transactions.initialise(self.config.transactions_from_id)
         self.bins.initialise(self.config.bins_from_id)
+        try:
+            self.db.align_machine_id(self.config.machine_id)
+        except pymysql.err.MySQLError as error:  # a machine without the table still syncs
+            log.warning("machineinformation could not be checked", extra={"context": {"error": str(error)[:300]}})
         self._ready = True
         log.info("Machine database ready")
 
