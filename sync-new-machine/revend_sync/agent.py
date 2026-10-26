@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 
 # Clock drift the API tolerates is 300 s; warn well before that.
 CLOCK_WARN_SECONDS = 60
+# Newest rejected messages in every heartbeat, for the panel's service tab.
+DEAD_LETTERS_REPORTED = 10
+DEAD_LETTER_ERROR_CHARS = 300
 # Object addresses ("<... object at 0x...>") in requests' connection errors
 # differ on every attempt and would defeat the repeat check in _report.
 OBJECT_ADDRESS = re.compile(r"\bat 0x[0-9a-fA-F]+")
@@ -226,6 +229,15 @@ class Agent:
                 "oldestPendingAt": _iso(stats["oldest_pending_at"]) if stats["oldest_pending_at"] else None,
                 "lastSentAt": _iso(self.sender.last_sent_at) if self.sender.last_sent_at else None,
                 "machineDbConnected": bool(self.db_ok),
+                "deadLetters": [
+                    {
+                        "id": dead["id"],
+                        "kind": dead["kind"],
+                        "createdAt": _iso(dead["created_at"]),
+                        "error": str(dead["last_error"] or "")[:DEAD_LETTER_ERROR_CHARS],
+                    }
+                    for dead in self.store.dead_letters(DEAD_LETTERS_REPORTED)
+                ],
             },
         }
         self.client.post(self.config.url("heartbeat"), encode_body(payload), uuid.uuid4().hex)

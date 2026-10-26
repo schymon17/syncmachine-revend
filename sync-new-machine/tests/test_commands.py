@@ -92,3 +92,29 @@ def test_a_refresh_with_an_empty_catalogue_fails_and_keeps_the_current_one(machi
     assert db.query("SELECT COUNT(*) AS n FROM barcode")[0]["n"] == 20
     result = api.got("agent/result")[0]
     assert result["status"] == "failed" and "not imported" in result["error"]
+
+
+@requires_mysql
+def test_rejected_messages_are_reported_and_resent_on_command(machine, api, client, store, tmp_path):
+    from revend_sync.agent import Agent
+
+    db, _ = machine
+    seed_pool(db, [])
+    store.enqueue("bins", api.base + "/api/revend/machine/v2/bins", b"{}")
+    message_id = store.due()[0].id
+    store.reject(message_id, "HTTP 409 seal_already_used " + "x" * 1000)
+
+    config = config_for(api.base, db)
+    Agent(config, store, db=db, client=client, data_dir=tmp_path).heartbeat()
+    agent_state = api.got("heartbeat")[0]["agent"]
+    assert agent_state["queueDeadLetter"] == 1
+    [dead] = agent_state["deadLetters"]
+    assert (dead["id"], dead["kind"]) == (message_id, "bins")
+    assert dead["error"].startswith("HTTP 409 seal_already_used") and len(dead["error"]) == 300
+
+    api.commands = [{"id": 9, "type": "requeue_dead"}]
+    assert commands.poll(client, db, config, store) == 1
+
+    result = api.got("agent/result")[0]
+    assert result["status"] == "done" and result["result"] == {"requeued": 1}
+    assert store.stats()["dead"] == 0 and [m.id for m in store.due()] == [message_id]
