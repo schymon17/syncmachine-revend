@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -24,6 +25,9 @@ log = logging.getLogger(__name__)
 
 # Clock drift the API tolerates is 300 s; warn well before that.
 CLOCK_WARN_SECONDS = 60
+# Object addresses ("<... object at 0x...>") in requests' connection errors
+# differ on every attempt and would defeat the repeat check in _report.
+OBJECT_ADDRESS = re.compile(r"\bat 0x[0-9a-fA-F]+")
 
 
 @dataclass
@@ -166,7 +170,7 @@ class Agent:
         self, task: Task, error: Exception, level: int = logging.ERROR, exc_info: bool = False
     ) -> None:
         """Log a task failure once, and again only every 10 minutes while it persists."""
-        message = f"{type(error).__name__}: {error}"[:500]
+        message = OBJECT_ADDRESS.sub("at 0x…", f"{type(error).__name__}: {error}")[:500]
         now = time.monotonic()
         if message != task.last_error or now - task.last_error_logged_at > 600:
             log.log(
