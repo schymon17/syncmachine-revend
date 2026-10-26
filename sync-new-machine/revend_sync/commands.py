@@ -33,6 +33,7 @@ def poll(client: Client, db: MachineDb, config: Config, store: Store) -> int:
     handlers: dict[str, Callable[[], dict[str, Any]]] = {
         "clear_coupon_pool": lambda: clear_coupon_pool(client, db, config),
         "refresh_eans": lambda: refresh_eans(client, db, store, config),
+        "requeue_dead": lambda: {"requeued": store.requeue_dead()},
     }
     ran = 0
     for command in commands if isinstance(commands, list) else []:
