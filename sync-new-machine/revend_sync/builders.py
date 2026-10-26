@@ -5,7 +5,8 @@ October 2026): ``bottlevalue`` 5 for a 0.50 zl deposit, ``metal`` 1 for a
 can, 0 for PET and NULL for an unrecognised rejected item,
 ``recognitionstatus`` 1 = accepted and other codes up to 44 = rejected,
 ``transactiondone`` 2, 4 or 5 for a finished transaction, ``bin_type``
-``left`` for PET and ``right`` for cans.
+``left`` for PET and ``right`` for cans; ``glass`` is sent as it is,
+like the PHP agent does on v1.
 """
 
 from __future__ import annotations
@@ -25,7 +26,15 @@ MAX_ROWS_PER_BATCH = 3000
 MAX_COUPON_LENGTH = 32
 MIN_DATELINE = 946684800  # 2000-01-01, the API's lower bound for seals
 
-BIN_TYPES = {"left": "pet", "right": "can", "pet": "pet", "can": "can", "plastic": "pet", "metal": "can"}
+BIN_TYPES = {
+    "left": "pet",
+    "right": "can",
+    "pet": "pet",
+    "can": "can",
+    "plastic": "pet",
+    "metal": "can",
+    "glass": "glass",
+}
 
 
 @dataclass

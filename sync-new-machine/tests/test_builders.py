@@ -101,6 +101,9 @@ def test_bin_sides_map_to_materials():
     odd = builders.build_bin(
         MACHINE_ID, {"id": 3, "barcode": "SEAL3", "bin_type": "MIX", "dateline": 1790000000}
     )
+    glass = builders.build_bin(
+        MACHINE_ID, {"id": 5, "barcode": "SEAL5", "bin_type": "Glass", "dateline": 1790000000}
+    )
     broken = builders.build_bin(
         MACHINE_ID, {"id": 4, "barcode": "", "bin_type": "left", "dateline": 1790000000}
     )
@@ -110,6 +113,7 @@ def test_bin_sides_map_to_materials():
     ]
     assert right.value["data"]["empty_records"][0]["bin_type"] == "can"
     assert odd.value["data"]["empty_records"][0]["bin_type"] == "pet" and odd.problems
+    assert glass.value["data"]["empty_records"][0]["bin_type"] == "glass" and not glass.problems
     assert broken.value is None and broken.problems
 
 
