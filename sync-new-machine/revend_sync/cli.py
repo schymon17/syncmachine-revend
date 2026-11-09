@@ -53,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument("--db-password")
     install.add_argument("--install-root", type=Path, default=None)
     install.add_argument("--keep-legacy", action="store_true", help="do not stop the old PHP agent")
+    install.add_argument(
+        "--reset-data",
+        action="store_true",
+        help="empty the machine's transactions, bags and coupons, then fetch the catalogue and coupons anew",
+    )
 
     uninstall = commands.add_parser("uninstall", help="stop the agent and remove it from autostart")
     uninstall.add_argument(
@@ -149,6 +154,7 @@ def _install(args: argparse.Namespace, home: Path) -> int:
         db_password=args.db_password,
         data_dir=home,
         stop_legacy=not args.keep_legacy,
+        reset_data=args.reset_data,
     )
     if args.install_root:
         options.install_root = args.install_root

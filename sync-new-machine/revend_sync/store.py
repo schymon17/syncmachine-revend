@@ -270,6 +270,9 @@ class Store:
             (key, json.dumps(value)),
         )
 
+    def forget(self, *keys: str) -> None:
+        self._db.executemany("DELETE FROM state WHERE key = ?", [(key,) for key in keys])
+
     # --- sent transaction fingerprints ------------------------------------
 
     def sent_transaction(

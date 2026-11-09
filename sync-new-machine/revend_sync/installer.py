@@ -19,11 +19,19 @@ from typing import Any, Callable
 
 import requests
 
-from . import __version__, legacy, windows
+from . import __version__, catalog, legacy, windows
+from .api import Client
+from .collectors import BinCollector, TransactionCollector
 from .config import Config, home, save
 from .machine_db import DbSettings, MachineDb
+from .store import Store
 
 DEFAULT_PANEL = "https://panel.revend.pl"
+# --reset-data: tables emptied on the machine. The product catalogue
+# (``barcode``) is not emptied but replaced from ReVend in one swap, so the
+# machine is never left without one.
+RESET_TABLES = ("user_transaction", "empty_record", "printer_barcode")
+RESET_CHUNK = 5000
 
 
 class InstallError(Exception):
@@ -45,6 +53,7 @@ class InstallOptions:
     data_dir: Path = field(default_factory=home)
     register_task: bool = True
     stop_legacy: bool = True
+    reset_data: bool = False
 
 
 def redeem(panel_url: str, code: str, session: Any = requests) -> dict[str, Any]:
@@ -138,10 +147,14 @@ def _finish(
     machine_db: MachineDb,
     say: Callable[[str], None],
 ) -> Config:
-    transactions_from, bins_from = legacy.cursors(old, machine_db)
-    say(
-        f"Transakcje od id {transactions_from}, worki od id {bins_from} (nadwyżkę serwer odrzuci jako duplikaty)"
-    )
+    if options.reset_data:
+        transactions_from, bins_from = _reset_machine_data(machine_db, options.data_dir, say)
+    else:
+        transactions_from, bins_from = legacy.cursors(old, machine_db)
+        say(
+            f"Transakcje od id {transactions_from}, worki od id {bins_from} "
+            "(nadwyżkę serwer odrzuci jako duplikaty)"
+        )
 
     config = Config(
         machine_id=enrollment["machineId"],
@@ -158,6 +171,8 @@ def _finish(
         config.adverts_image_dir = advert_dirs[0] or config.adverts_image_dir
         config.adverts_video_dir = advert_dirs[1] or config.adverts_video_dir
     save(config, options.data_dir)
+    if options.reset_data:
+        _refill(config, machine_db, options.data_dir, say)
     machine_db.close()
 
     # 4. Files and autostart.
@@ -193,6 +208,58 @@ def _db_settings(options: InstallOptions, old: legacy.LegacyAgent | None) -> DbS
         user=options.db_user or base.user,
         password=options.db_password if options.db_password is not None else base.password,
     )
+
+
+def _reset_machine_data(machine_db: MachineDb, data_dir: Path, say: Callable[[str], None]) -> tuple[int, int]:
+    """Empty the machine's transactions, bags and coupon pool; the agent then sends from id 1.
+
+    DELETE, not TRUNCATE: the machine's own AUTO_INCREMENT keeps counting, and
+    a cursor at 1 picks up new rows either way. The server deduplicates
+    transactions by coupon and bags by seal, so reused ids cannot clash.
+    The agent's own cursors and catalogue fingerprint are forgotten too - on
+    a reinstall they would point past the emptied tables.
+    """
+    for table in RESET_TABLES:
+        deleted = 0
+        while True:
+            count = machine_db.execute(f"DELETE FROM `{table}` LIMIT {RESET_CHUNK}")
+            deleted += count
+            if count < RESET_CHUNK:
+                break
+        say(f"Usunięto z {table}: {deleted} wierszy")
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    store = Store(data_dir / "agent.db")
+    try:
+        store.forget(
+            TransactionCollector.STATE_LOW,
+            TransactionCollector.STATE_START,
+            BinCollector.STATE_LAST,
+            BinCollector.STATE_SINCE,
+            "eans_hash",
+        )
+    finally:
+        store.close()
+    return 1, 1
+
+
+def _refill(config: Config, machine_db: MachineDb, data_dir: Path, say: Callable[[str], None]) -> None:
+    """Fetch the catalogue and coupons now; on failure the running agent does it within minutes."""
+    client = Client(config.key_id, config.secret)
+    store = Store(data_dir / "agent.db")
+    try:
+        if config.eans_enabled:
+            if catalog.sync_eans(client, machine_db, store, config, force=True):
+                count = machine_db.query("SELECT COUNT(*) AS n FROM barcode")[0]["n"]
+                say(f"Baza opakowań wymieniona na pobraną z ReVend: {count} produktów")
+            else:
+                say("Baza opakowań z ReVend pusta albo niepełna - została dotychczasowa (szczegóły w logu).")
+        if config.coupons_enabled:
+            say(f"Pobrano kupony z ReVend: {catalog.top_up_coupons(client, machine_db, config)}")
+    except Exception as error:  # noqa: BLE001 - the agent retries on its own schedule
+        say(f"Nie udało się teraz pobrać bazy opakowań/kuponów ({error}) - agent pobierze je po starcie.")
+    finally:
+        store.close()
 
 
 def _stop_legacy(
