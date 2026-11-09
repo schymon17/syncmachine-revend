@@ -8,6 +8,9 @@ Instalacja (jako administrator), kod instalacyjny z karty maszyny w panelu:
   Windows 7 albo bez internetu w PowerShellu:
     rozpakuj ten zip na maszynie i uruchom:  install.cmd RV-XXXX-XXXX-XXXX
 
+Czysta instalacja (kasuje na maszynie transakcje, worki i kupony, baze opakowan
+pobiera od nowa): dopisz -ResetData w PowerShellu albo /reset po kodzie w install.cmd.
+
 Instalator sam znajduje i wylacza starego agenta PHP (daemon.bat), przejmuje
 jego ustawienia bazy i miejsce, w ktorym skonczyl wysylac.
 

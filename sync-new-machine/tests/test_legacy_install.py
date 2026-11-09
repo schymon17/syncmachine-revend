@@ -7,6 +7,7 @@ import time
 
 from revend_sync import config, legacy
 from revend_sync.installer import InstallOptions, install
+from revend_sync.store import Store
 
 from .fake_api import KEY_ID, MACHINE_ID, SECRET
 from .mysql_support import insert_item, requires_mysql
@@ -205,3 +206,74 @@ def test_without_the_old_agent_the_db_password_comes_from_the_panel(machine, tmp
     )
 
     assert config.load(tmp_path / "data").db.password == settings.password
+
+
+def test_reset_data_empties_the_machine_and_fetches_the_catalogue_and_coupons_anew(machine, tmp_path, api):
+    db, _ = machine
+    settings = db._settings
+    now = int(time.time())
+    for i in range(3):
+        insert_item(db, f"OLD{i}", now - 600, done=2, id=i + 1)
+    db.execute(
+        "INSERT INTO empty_record (id, dateline, bin_type, barcode) VALUES (7, %s, 'left', 'S7')", (now,)
+    )
+    db.execute("INSERT INTO printer_barcode (barcode) VALUES ('C-OLD')")
+    db.execute("INSERT INTO barcode (barcode, brand) VALUES ('1111111111111', 'Old')")
+    api.eans = [{"barcode": "5900000000001", "brand": "New"}]
+    api.coupons = [f"C-{i}" for i in range(60)]
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    # A reinstall: the previous agent's cursors are past the emptied tables.
+    previous = Store(data_dir / "agent.db")
+    previous.set("trans_low_id", 500)
+    previous.set("bins_last_id", 80)
+    previous.set("eans_hash", "stale")
+    previous.close()
+
+    enrollment = tmp_path / "enrollment.json"
+    enrollment.write_text(
+        json.dumps(
+            {
+                "machineId": MACHINE_ID,
+                "integration": "kaucja",
+                "keyId": KEY_ID,
+                "secret": SECRET,
+                "apiBaseUrl": api.base,
+                "agentBaseUrl": api.base,
+            }
+        )
+    )
+    messages = []
+
+    install(
+        InstallOptions(
+            enrollment_file=enrollment,
+            legacy_dir=tmp_path / "no-legacy",
+            db_host=settings.host,
+            db_port=settings.port,
+            db_name=settings.database,
+            db_user=settings.user,
+            db_password=settings.password,
+            install_root=tmp_path / "Sync",
+            data_dir=data_dir,
+            register_task=False,
+            stop_legacy=False,
+            reset_data=True,
+        ),
+        say=messages.append,
+    )
+
+    count = lambda table: db.query(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"]  # noqa: E731
+    assert (count("user_transaction"), count("empty_record")) == (0, 0)
+    assert [r["barcode"] for r in db.query("SELECT barcode FROM barcode")] == ["5900000000001"]
+    coupons = {r["barcode"] for r in db.query("SELECT barcode FROM printer_barcode")}
+    assert len(coupons) == 50 and "C-OLD" not in coupons
+
+    saved = config.load(data_dir)
+    assert (saved.transactions_from_id, saved.bins_from_id) == (1, 1)
+    store = Store(data_dir / "agent.db")
+    assert store.get("trans_low_id") is None and store.get("bins_last_id") is None
+    assert store.get("eans_hash") not in (None, "stale")
+    store.close()
+    assert any("user_transaction: 3" in m for m in messages)

@@ -101,6 +101,13 @@ Obie drogi kończą się w `revend-sync.exe install`, który:
 4. kopiuje program do `C:\Program Files\ReVend\Sync\versions\<wersja>` i rejestruje
    zadanie „ReVend Sync” (SYSTEM, przy starcie, restart po awarii).
 
+Czysta instalacja: `-ResetData` w PowerShellu (`... -Code RV-XXXX-XXXX-XXXX -ResetData`),
+`install.cmd RV-XXXX-XXXX-XXXX /reset` albo `revend-sync.exe install --reset-data`. Instalator
+wtedy kasuje na maszynie transakcje (`user_transaction`), worki (`empty_record`) i kupony
+(`printer_barcode`), wysyła od id 1 i od razu pobiera z ReVend kupony i bazę opakowań
+(`barcode` podmieniana w całości, nigdy pusta). Niewysłanych transakcji i worków nie da się
+potem odzyskać.
+
 Gdy coś się nie uda po zatrzymaniu starego agenta, instalator przywraca jego autostart.
 Odinstalowanie: `revend-sync.cmd uninstall --restore-legacy`.
 
