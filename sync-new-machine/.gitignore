@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 .ruff_cache/
 docker/mysql/data/
+*.egg-info/
+.build-venv/
