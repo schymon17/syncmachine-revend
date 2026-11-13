@@ -8,4 +8,4 @@ Everything that leaves the machine goes through a durable local queue first,
 so nothing is lost while the machine is offline.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
