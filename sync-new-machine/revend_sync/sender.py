@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Callable
 
-from .api import ApiError, Client
+from .api import AUTH_PAUSE_SECONDS, ApiError, Client
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,10 @@ BACKOFF = [1, 2, 4, 8, 16, 30, 60]
 # one small request per 15 s costs nothing, and queued transactions go out
 # within about 15 s of the connection returning instead of up to 72 s.
 OFFLINE_MAX_SECONDS = 15
+# The API allows 120 requests a minute per key. After an outage the outbox
+# could go out at 20 a second and hit that limit; the sender keeps to this
+# many a minute and leaves the rest for heartbeats, commands and coupons.
+SENDS_PER_MINUTE = 60
 
 
 def backoff(attempt: int, rng: Callable[[], float] = random.random) -> float:
@@ -34,7 +39,10 @@ class Sender:
     - Network error: the whole sender pauses (no point hammering every
       message while offline); messages keep their place.
     - 429: the limit is per key, so every other message would get it too;
-      the whole sender pauses until the limit resets.
+      the whole sender pauses until the limit resets. The sender also keeps
+      under ``SENDS_PER_MINUTE`` itself, so a backlog does not cause a 429.
+    - Rejected key (401): the message keeps its place and the sender pauses
+      for ``AUTH_PAUSE_SECONDS``; the client logs it once.
     - Other retryable HTTP error (408/5xx, stale clock, request in progress):
       that message waits with backoff, others continue.
     - Any other 4xx: the API rejected the data; the message becomes a dead
@@ -47,6 +55,7 @@ class Sender:
         self._now = now
         self._paused_until = 0.0
         self._offline_attempts = 0
+        self._sent_at: deque[float] = deque()
         self.last_sent_at: float | None = store.get("last_sent_at")
         self.online: bool | None = None
 
@@ -56,12 +65,18 @@ class Sender:
             return 0
 
         delivered = 0
-        for message in self._store.due(limit):
+        for message in self._store.due(min(limit, self._budget())):
+            self._sent_at.append(self._now())
             try:
                 self._client.post(message.url, message.body, message.idempotency_key)
             except ApiError as error:
+                if error.auth:
+                    # Not the message's fault: no attempt is counted.
+                    self._store.retry_later(message.id, 0, str(error), count_attempt=False)
+                    self._paused_until = self._now() + AUTH_PAUSE_SECONDS
+                    return delivered
                 if error.network:
-                    self._go_offline(error)
+                    self._go_offline()
                     self._store.retry_later(message.id, 0, str(error))
                     return delivered
                 self._handle_http_error(message.id, message.kind, message.attempts, error)
@@ -76,6 +91,12 @@ class Sender:
             self._store.set("last_sent_at", self.last_sent_at)
 
         return delivered
+
+    def _budget(self) -> int:
+        """How many messages may go out now without passing SENDS_PER_MINUTE."""
+        while self._sent_at and self._now() - self._sent_at[0] >= 60:
+            self._sent_at.popleft()
+        return max(0, SENDS_PER_MINUTE - len(self._sent_at))
 
     def _handle_http_error(self, message_id: int, kind: str, attempts: int, error: ApiError) -> None:
         self._mark_online()
@@ -124,18 +145,13 @@ class Sender:
             log.warning("API rate limit reached, pausing sends", extra={"context": {"seconds": round(delay)}})
         self._paused_until = self._now() + delay
 
-    def _go_offline(self, error: ApiError) -> None:
+    def _go_offline(self) -> None:
         delay = min(backoff(self._offline_attempts), OFFLINE_MAX_SECONDS)
         self._offline_attempts += 1
         self._paused_until = self._now() + delay
-        if self.online is not False:
-            log.warning(
-                "API unreachable, queueing until it is back", extra={"context": {"error": str(error)[:300]}}
-            )
+        # The client logs the outage, once for every task.
         self.online = False
 
     def _mark_online(self) -> None:
-        if self.online is False:
-            log.info("API reachable again, sending queued messages")
         self.online = True
         self._offline_attempts = 0
