@@ -1,6 +1,6 @@
 [project]
 name = "revend-sync"
-version = "3.0.0"
+version = "3.0.1"
 description = "ReVend machine sync agent (Machine API v2)"
 # 3.8: the last Python that runs on Windows 7, still part of the fleet.
 requires-python = ">=3.8"
