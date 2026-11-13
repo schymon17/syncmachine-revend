@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 import uuid
@@ -14,7 +13,7 @@ from pathlib import Path
 import pymysql
 
 from . import __version__, adverts, catalog, commands, logs, updates
-from .api import ApiError, Client, encode_body
+from .api import OBJECT_ADDRESS, ApiError, Client, encode_body
 from .collectors import BinCollector, StatusCollector, TransactionCollector
 from .config import Config
 from .machine_db import MachineDb
@@ -28,9 +27,6 @@ CLOCK_WARN_SECONDS = 60
 # Newest rejected messages in every heartbeat, for the panel's service tab.
 DEAD_LETTERS_REPORTED = 10
 DEAD_LETTER_ERROR_CHARS = 300
-# Object addresses ("<... object at 0x...>") in requests' connection errors
-# differ on every attempt and would defeat the repeat check in _report.
-OBJECT_ADDRESS = re.compile(r"\bat 0x[0-9a-fA-F]+")
 
 
 @dataclass
@@ -41,6 +37,9 @@ class Task:
     next_at: float = 0.0
     needs_db: bool = False
     last_error: str | None = None
+    # Kept across recoveries: a task that fails, recovers and fails again
+    # with the same error every few minutes logs it once per 10 minutes.
+    last_logged_error: str | None = None
     last_error_logged_at: float = 0.0
 
 
@@ -164,6 +163,10 @@ class Agent:
             self._db_state(False, error)
             self._report(task, error)
         except ApiError as error:
+            if error.network or error.auth:
+                # Shared by every task; the client logs it once.
+                task.last_error = str(error)
+                return
             # Reads (EANs, coupons, updates) simply retry on their next run.
             self._report(task, error, level=logging.WARNING if error.retryable else logging.ERROR)
         except Exception as error:  # noqa: BLE001 - keep the agent alive whatever a task does
@@ -175,7 +178,7 @@ class Agent:
         """Log a task failure once, and again only every 10 minutes while it persists."""
         message = OBJECT_ADDRESS.sub("at 0x…", f"{type(error).__name__}: {error}")[:500]
         now = time.monotonic()
-        if message != task.last_error or now - task.last_error_logged_at > 600:
+        if message != task.last_logged_error or now - task.last_error_logged_at > 600:
             log.log(
                 level,
                 "Task %s failed",
@@ -183,6 +186,7 @@ class Agent:
                 exc_info=exc_info,
                 extra={"context": {"task": task.name, "error": message}},
             )
+            task.last_logged_error = message
             task.last_error_logged_at = now
         task.last_error = message
 

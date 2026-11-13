@@ -180,17 +180,20 @@ class Store:
                 )
             db.execute("DELETE FROM outbox WHERE id = ?", (message_id,))
 
-    def retry_later(self, message_id: int, delay: float, error: str, *, new_key: bool = False) -> None:
+    def retry_later(
+        self, message_id: int, delay: float, error: str, *, new_key: bool = False, count_attempt: bool = True
+    ) -> None:
+        increment = 1 if count_attempt else 0
         if new_key:
             self._db.execute(
-                "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?, idempotency_key = ? "
+                "UPDATE outbox SET attempts = attempts + ?, next_attempt_at = ?, last_error = ?, idempotency_key = ? "
                 "WHERE id = ?",
-                (time.time() + delay, error[:1000], uuid.uuid4().hex, message_id),
+                (increment, time.time() + delay, error[:1000], uuid.uuid4().hex, message_id),
             )
         else:
             self._db.execute(
-                "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, last_error = ? WHERE id = ?",
-                (time.time() + delay, error[:1000], message_id),
+                "UPDATE outbox SET attempts = attempts + ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
+                (increment, time.time() + delay, error[:1000], message_id),
             )
 
     def reject(self, message_id: int, error: str) -> None:
