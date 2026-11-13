@@ -92,4 +92,6 @@ def _report(
         client.post(config.agent_url(f"commands/{command_id}/result"), encode_body(body))
     except ApiError as failure:
         # The panel sends the command again after 10 minutes without a result.
-        log.warning("Could not report command %s: %s", command_id, failure)
+        # An outage or a rejected key is already logged once by the client.
+        if not (failure.network or failure.auth):
+            log.warning("Could not report command %s: %s", command_id, failure)
